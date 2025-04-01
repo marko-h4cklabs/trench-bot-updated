@@ -1,0 +1,166 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"ca-scraper/agent/internal/bot"
+	"ca-scraper/agent/internal/handlers"
+	"ca-scraper/agent/internal/services"
+	"ca-scraper/shared/config"
+	"ca-scraper/shared/logger"
+	"ca-scraper/shared/utils"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+)
+
+// Ensure transaction monitor starts only once
+var transactionMonitorRunning bool
+var transactionMonitorMutex = &sync.Mutex{}
+
+func main() {
+	// ✅ Recover from unexpected panics
+	defer func() {
+		if r := recover(); r != nil {
+			log.Fatalf("❌ Program crashed with panic: %v", r)
+		}
+	}()
+
+	// ✅ Set Gin mode to release for production
+	gin.SetMode(gin.ReleaseMode)
+	log.Println("✅ Gin mode set to release.")
+
+	// ✅ Load environment variables
+	envPath := filepath.Join("/home/markosrnec5/ca-scraper/agent/.env")
+	if err := godotenv.Load(envPath); err != nil {
+		log.Println("⚠️ Warning: .env file not found, using system environment variables.")
+	} else {
+		log.Println("✅ Environment variables loaded successfully.")
+	}
+
+	// ✅ Load configuration
+	cfg, err := config.LoadConfig("agent/config.yaml")
+	if err != nil {
+		log.Fatalf("❌ Failed to load configuration: %v", err)
+	}
+	log.Println("✅ Loaded configuration successfully.")
+
+	// ✅ Save configuration globally
+	config.SetGlobalConfig(cfg)
+
+	// ✅ Initialize Logger
+	appLogger, err := logger.NewLogger(cfg.App.Environment, true)
+	if err != nil {
+		log.Fatalf("❌ Failed to initialize logger: %v", err)
+	}
+	log.Println("✅ Logger initialized successfully.")
+
+	// ✅ Initialize Telegram Bot
+	log.Println("🚀 Initializing Telegram Bot...")
+	if err := bot.InitializeBot(); err != nil {
+		log.Fatalf("❌ Failed to initialize Telegram Bot: %v", err)
+	}
+	log.Println("✅ Telegram Bot initialized successfully.")
+
+	// ✅ Fetch SOL price at startup
+	if price, err := services.FetchSOLPrice(); err != nil {
+		log.Printf("⚠️ Warning: Failed to fetch SOL price: %v", err)
+	} else {
+		log.Printf("✅ SOL Price at startup: $%.2f", price)
+	}
+
+	// ✅ Initialize Solana settings
+	log.Println("🚀 Initializing Solana settings...")
+	services.InitializeSolana()
+	log.Println("✅ Solana settings initialized.")
+
+	// ✅ Determine application port
+	port := cfg.App.Port
+	if port == "" {
+		port = "5555"
+	}
+	log.Printf("✅ Application will run on port: %s", port)
+
+	// ✅ Create Gin router
+	log.Println("🚀 Creating Gin router...")
+	router := gin.Default()
+
+	// ✅ Enable CORS for frontend requests
+	router.Use(cors.Default())
+
+	// ✅ Set trusted proxies for security
+	log.Println("✅ Setting trusted proxies to nil.")
+	router.SetTrustedProxies(nil)
+
+	// ✅ Register API routes
+	log.Println("🚀 Registering API routes...")
+	handlers.RegisterRoutes(router, appLogger.ZapLogger, appLogger)
+
+	// ✅ Start Gin Server in a Goroutine
+	go func() {
+		log.Printf("🚀 Server is now running and listening on: http://localhost:%s", port)
+		if err := router.Run(":" + port); err != nil {
+			log.Fatalf("❌ Could not start server: %v", err)
+		}
+	}()
+
+	// ✅ Run Startup Health Checks
+	go RunStartupTests()
+
+	// ✅ Keep the program alive (prevents main from exiting)
+	select {}
+}
+
+// ✅ Run Startup Tests
+func RunStartupTests() {
+	log.Println("⏳ Waiting for the server to start before running tests...")
+	time.Sleep(5 * time.Second)
+
+	log.Println("🚀 Running Startup Health Checks...")
+
+	allTestsPassed := true
+
+	endpoints := []struct {
+		path   string
+		method string
+	}{
+		{"/api/v1/health", "GET"},
+		{"/api/v1/dexscreener", "GET"},
+	}
+
+	for _, ep := range endpoints {
+		log.Printf("🔍 Running Test: %s [%s]", ep.method, ep.path)
+		if !testLocalAPI(ep.path, ep.method) {
+			allTestsPassed = false
+			log.Printf("❌ Test Failed: %s [%s]", ep.method, ep.path)
+		} else {
+			log.Printf("✅ Test Passed: %s [%s]", ep.method, ep.path)
+		}
+	}
+
+	if allTestsPassed {
+		log.Println("✅ All Startup Tests Passed Successfully! 🎉")
+	} else {
+		log.Println("❌ Some Tests Failed. Check logs for details.")
+	}
+}
+
+// ✅ Test Local API Endpoints
+func testLocalAPI(endpoint string, method string) bool {
+	url := fmt.Sprintf("http://localhost:5555%s", endpoint)
+	resp, err := http.Get(url)
+
+	if err != nil {
+		log.Printf("❌ Failed to connect to %s: %v", endpoint, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}

@@ -1,0 +1,193 @@
+package services
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"sync"
+
+	"ca-scraper/agent/internal/bot"
+	"github.com/gin-gonic/gin"
+)
+
+// DexScreener API URL
+const DexScreenerAPI = "https://api.dexscreener.com/latest/dex/pairs"
+
+// Filtering Constants
+const (
+	MinLiquidity = 40000  // Minimum liquidity in USD
+	MinMarketCap = 50000  // Minimum market cap in USD
+	MaxMarketCap = 250000 // Maximum market cap in USD
+	MinTx1H      = 500    // Minimum transactions in 1 hour
+	MinTx5M      = 100    // Minimum transactions in 5 minutes
+	MaxBuyRatio  = 80.0   // Maximum buy percentage to avoid potential rugs
+)
+
+// API Response Structs
+
+type Token struct {
+	Address string `json:"address"`
+	Name    string `json:"name"`
+	Symbol  string `json:"symbol"`
+}
+
+type Liquidity struct {
+	USD   float64 `json:"usd"`
+	Base  float64 `json:"base"`
+	Quote float64 `json:"quote"`
+}
+
+type Volume struct {
+	M5  float64 `json:"m5"`
+	H1  float64 `json:"h1"`
+	H6  float64 `json:"h6"`
+	H24 float64 `json:"h24"`
+}
+
+type Txns struct {
+	M5    int     `json:"m5"`
+	H1    int     `json:"h1"`
+	Buys  float64 `json:"buys"`
+	Sells float64 `json:"sells"`
+}
+
+type DexPair struct {
+	ChainID       string    `json:"chainId"`
+	DexID         string    `json:"dexId"`
+	URL           string    `json:"url"`
+	PairAddress   string    `json:"pairAddress"`
+	BaseToken     Token     `json:"baseToken"`
+	QuoteToken    Token     `json:"quoteToken"`
+	PriceUsd      string    `json:"priceUsd"`
+	Liquidity     Liquidity `json:"liquidity"`
+	MarketCap     float64   `json:"marketCap"`
+	Volume        Volume    `json:"volume"`
+	Txns          Txns      `json:"txns"`
+	PriceChange1H float64   `json:"priceChange1h"`
+}
+
+type DexResponse struct {
+	SchemaVersion string    `json:"schemaVersion"`
+	Pairs         []DexPair `json:"pairs"`
+}
+
+// Fetch DexScreener Data
+func fetchDexScreenerData(chainId, pairId string) (*DexPair, error) {
+	url := fmt.Sprintf("%s/%s/%s", DexScreenerAPI, chainId, pairId)
+	log.Printf("Fetching DexScreener data: %s", url)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch DexScreener data: status code %d", resp.StatusCode)
+	}
+
+	var result DexResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	if len(result.Pairs) == 0 {
+		return nil, fmt.Errorf("no pairs found")
+	}
+
+	return &result.Pairs[0], nil
+}
+
+// Validate Token Against Filters
+func validateToken(dexData *DexPair) bool {
+	if dexData.Liquidity.USD < MinLiquidity {
+		return false
+	}
+	if dexData.MarketCap < MinMarketCap || dexData.MarketCap > MaxMarketCap {
+		return false
+	}
+	if dexData.Txns.H1 < MinTx1H || dexData.Txns.M5 < MinTx5M {
+		return false
+	}
+
+	// Calculate Buy/Sell Ratio
+	totalTxns := dexData.Txns.Buys + dexData.Txns.Sells
+	if totalTxns > 0 {
+		buyRatio := (dexData.Txns.Buys / totalTxns) * 100
+		if buyRatio > MaxBuyRatio {
+			log.Printf("Skipping token %s - Buy ratio too high (%.2f%%)", dexData.BaseToken.Symbol, buyRatio)
+			return false
+		}
+	}
+
+	return true
+}
+
+// Gin API Handler
+func GetDexPairHandler(c *gin.Context) {
+	chainId := c.DefaultQuery("chainId", "")
+	pairId := c.DefaultQuery("pairId", "")
+
+	if chainId == "" || pairId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing chainId or pairId"})
+		return
+	}
+
+	var wg sync.WaitGroup
+	var dexData *DexPair
+	var dexErr error
+
+	// Fetch DexScreener Data
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		dexData, dexErr = fetchDexScreenerData(chainId, pairId)
+	}()
+	wg.Wait()
+
+	if dexErr != nil || dexData == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch DexScreener data"})
+		return
+	}
+
+	// Validate token against filters
+	if !validateToken(dexData) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Token does not meet criteria"})
+		return
+	}
+
+	// Send alert through Telegram bot
+	message := fmt.Sprintf(
+		`🚀 *New Token Alert* 🚀
+🔗 *Pair:* [%s](%s)
+🪙 *Token:* %s ($%s)
+💰 *Market Cap:* $%.1fk
+💦 *Liquidity:* $%.1fk
+📊 *Txns (1H):* %d
+📊 *Txns (5m):* %d
+🛒 *Buys:* %.0f
+📉 *Sells:* %.0f
+🕒 *Price Change (1H):* %.2f%%`,
+		dexData.PairAddress, dexData.URL, dexData.BaseToken.Name, dexData.BaseToken.Symbol,
+		dexData.MarketCap/1000, dexData.Liquidity.USD/1000, dexData.Txns.H1, dexData.Txns.M5,
+		dexData.Txns.Buys, dexData.Txns.Sells, dexData.PriceChange1H,
+	)
+
+	bot.SendTelegramMessage(message) // Call function from `bot.go`
+
+	// Construct and return the response
+	response := map[string]interface{}{
+		"tokenInfo": dexData,
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// Main Function to Start Server
+func StartDexScreenerService(router *gin.Engine) {
+	router.GET("/dex-pair", GetDexPairHandler)
+	log.Println("DexScreener service initialized")
+}

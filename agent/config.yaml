@@ -1,0 +1,9 @@
+app:
+  port: "5555"
+  environment: "development"
+
+logging:
+  level: "info"
+
+agent:
+	authtoken: 2u32IkfIHKQZRdDbasWRQiGYk0R_2Rv7knZuhGGdyCBnhpqXL

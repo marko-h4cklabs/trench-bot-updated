@@ -1,0 +1,164 @@
+package bot
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"ca-scraper/agent/database"
+	"ca-scraper/agent/internal/models"
+	"ca-scraper/agent/internal/services"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+// HandleCommand processes commands sent to the bot
+func HandleCommand(update tgbotapi.Update) {
+	command := update.Message.Command()
+	args := update.Message.CommandArguments()
+
+	// Log the command and arguments
+	appLogger.Info(fmt.Sprintf("Processing command '%s' with args: %s", command, args))
+
+	switch command {
+	case "whitelist":
+		handleWhitelistCommand(update, args)
+	case "walletupdate":
+		handleWalletUpdateCommand(update, args)
+	case "walletdelete":
+		handleWalletDeleteCommand(update, args)
+	case "checkwallet":
+		handleCheckWalletCommand(update, args)
+	default:
+		// Log unknown command
+		appLogger.Info(fmt.Sprintf("Unknown command '%s' received", command))
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("Unknown command: %s", command))
+	}
+}
+
+func handleWhitelistCommand(update tgbotapi.Update, args string) {
+	wallet := strings.TrimSpace(args)
+	if wallet == "" {
+		SendReply(update.Message.Chat.ID, "Usage: /whitelist {wallet-address}")
+		appLogger.Info("Whitelist command failed: no wallet address provided")
+		return
+	}
+
+	// Check if the wallet already exists in the database
+	var user models.User
+	result := database.DB.Where("wallet_id = ?", wallet).First(&user)
+	if result.RowsAffected > 0 {
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s is already whitelisted!", wallet))
+		appLogger.Info(fmt.Sprintf("Whitelist command failed: wallet %s already whitelisted", wallet))
+		return
+	}
+
+	// Add the wallet to the database
+	newUser := models.User{WalletID: wallet, NFTStatus: false}
+	if err := database.DB.Create(&newUser).Error; err != nil {
+		SendReply(update.Message.Chat.ID, "An error occurred while whitelisting the wallet.")
+		appLogger.Error(fmt.Sprintf("Whitelist command failed: error adding wallet %s to the database: %v", wallet, err))
+		return
+	}
+
+	// Log success and send a response
+	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s has been whitelisted!", wallet))
+	appLogger.Info(fmt.Sprintf("Wallet %s successfully whitelisted", wallet))
+}
+
+func handleWalletUpdateCommand(update tgbotapi.Update, args string) {
+	parts := strings.Fields(args)
+	if len(parts) != 2 {
+		SendReply(update.Message.Chat.ID, "Usage: /walletupdate {current-wallet-address} {updated-wallet-address}")
+		return
+	}
+
+	currentWallet := parts[0]
+	updatedWallet := parts[1]
+
+	// Check if the wallet exists in the database
+	var user models.User
+	result := database.DB.Where("wallet_id = ?", currentWallet).First(&user)
+	if result.RowsAffected == 0 {
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s is not in the whitelist.", currentWallet))
+		appLogger.Info(fmt.Sprintf("Wallet update failed: wallet %s not found", currentWallet))
+		return
+	}
+
+	// Update the wallet address
+	user.WalletID = updatedWallet
+	if err := database.DB.Save(&user).Error; err != nil {
+		appLogger.Error(fmt.Sprintf("Wallet update failed: error updating wallet %s to %s: %v", currentWallet, updatedWallet, err))
+		SendReply(update.Message.Chat.ID, "An error occurred while updating the wallet.")
+		return
+	}
+
+	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s has been updated to %s!", currentWallet, updatedWallet))
+	appLogger.Info(fmt.Sprintf("Wallet %s successfully updated to %s", currentWallet, updatedWallet))
+}
+
+func handleWalletDeleteCommand(update tgbotapi.Update, args string) {
+	wallet := strings.TrimSpace(args)
+	if wallet == "" {
+		SendReply(update.Message.Chat.ID, "Usage: /walletdelete {wallet-address}")
+		return
+	}
+
+	// Check if the wallet exists in the database
+	var user models.User
+	result := database.DB.Where("wallet_id = ?", wallet).First(&user)
+	if result.RowsAffected == 0 {
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s is not in the whitelist.", wallet))
+		appLogger.Info(fmt.Sprintf("Wallet delete failed: wallet %s not found", wallet))
+		return
+	}
+
+	// Delete the wallet
+	if err := database.DB.Delete(&user).Error; err != nil {
+		appLogger.Error(fmt.Sprintf("Wallet delete failed: error deleting wallet %s: %v", wallet, err))
+		SendReply(update.Message.Chat.ID, "An error occurred while deleting the wallet.")
+		return
+	}
+
+	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s has been removed from the whitelist!", wallet))
+	appLogger.Info(fmt.Sprintf("Wallet %s successfully deleted", wallet))
+}
+
+func handleCheckWalletCommand(update tgbotapi.Update, args string) {
+	walletAddress := strings.TrimSpace(args)
+	if walletAddress == "" {
+		SendReply(update.Message.Chat.ID, "Usage: /checkwallet {wallet-address}")
+		return
+	}
+
+	trenchDemonCollection := os.Getenv("TRENCH_DEMON_COLLECTION")
+	if trenchDemonCollection == "" {
+		SendReply(update.Message.Chat.ID, "Server configuration error: Missing Trench Demon Collection ID.")
+		appLogger.Error("Check wallet failed: missing TRENCH_DEMON_COLLECTION")
+		return
+	}
+
+	heliusAPIKey := os.Getenv("HELIUS_API_KEY") // ✅ Get API key from environment
+	ownsNFT, err := services.CheckTokenOwnership(heliusAPIKey, walletAddress, trenchDemonCollection)
+
+	if err != nil {
+		appLogger.Error(fmt.Sprintf("Check wallet failed: error checking ownership for %s: %v", walletAddress, err))
+		SendReply(update.Message.Chat.ID, "An error occurred while checking wallet ownership.")
+		return
+	}
+
+	if ownsNFT {
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("Yes, the wallet %s holds a Trench Demon NFT.", walletAddress))
+		appLogger.Info(fmt.Sprintf("Wallet %s owns a Trench Demon NFT", walletAddress))
+	} else {
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("No, the wallet %s does not hold a Trench Demon NFT.", walletAddress))
+		appLogger.Info(fmt.Sprintf("Wallet %s does not own a Trench Demon NFT", walletAddress))
+	}
+}
+
+func SendReply(chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	if _, err := bot.Send(msg); err != nil {
+		appLogger.Error(fmt.Sprintf("Failed to send reply: %v", err))
+	}
+}

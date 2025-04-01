@@ -1,0 +1,88 @@
+package bot
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"strconv"
+
+	telegram "ca-scraper/shared/types"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+var bot *tgbotapi.BotAPI
+var botToken string
+var groupID int64
+var systemLogsThreadID int
+
+// InitializeBot initializes the Telegram bot
+func InitializeBot() error {
+	var err error
+
+	// Get bot token and chat IDs from environment variables
+	botToken = os.Getenv("TELEGRAM_BOT_TOKEN")
+	groupIDStr := os.Getenv("TELEGRAM_GROUP_ID")
+	systemLogsThreadIDStr := os.Getenv("SYSTEM_LOGS_THREAD_ID")
+
+	// Parse group ID
+	groupID, err = strconv.ParseInt(groupIDStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("failed to parse TELEGRAM_GROUP_ID: %v", err)
+	}
+
+	// Parse system logs thread ID
+	systemLogsThreadID, err = strconv.Atoi(systemLogsThreadIDStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse SYSTEM_LOGS_THREAD_ID: %v", err)
+	}
+
+	// Initialize Telegram bot
+	bot, err = tgbotapi.NewBotAPI(botToken)
+	if err != nil {
+		return fmt.Errorf("failed to initialize Telegram bot: %v", err)
+	}
+
+	bot.Debug = false
+	log.Println("✅ Telegram Bot initialized successfully.")
+
+	// Send a startup message to logs thread
+	SendSystemLog("🚀 Telegram bot started successfully!")
+
+	return nil
+}
+
+// SendSystemLog sends a log message to the system logs thread
+func SendSystemLog(message string) {
+	if bot == nil {
+		log.Println("⚠️ Telegram bot is not initialized. Cannot send system logs.")
+		return
+	}
+
+	msg := tgbotapi.NewMessage(groupID, message)
+	msg.ReplyToMessageID = systemLogsThreadID
+	msg.ParseMode = "Markdown"
+
+	_, err := bot.Send(msg)
+	if err != nil {
+		log.Printf("❌ Failed to send system log: %v", err)
+	}
+}
+
+// SendTelegramMessage sends an alert message to the Telegram group
+func SendTelegramMessage(message string) {
+	if bot == nil {
+		log.Println("⚠️ Telegram bot is not initialized. Cannot send alert messages.")
+		return
+	}
+
+	msg := tgbotapi.NewMessage(groupID, message)
+	msg.ParseMode = "Markdown"
+
+	_, err := bot.Send(msg)
+	if err != nil {
+		log.Printf("❌ Failed to send Telegram message: %v", err)
+	} else {
+		log.Println("✅ Alert sent to Telegram.")
+	}
+}

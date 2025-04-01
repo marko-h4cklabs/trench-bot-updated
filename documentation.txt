@@ -1,0 +1,9 @@
+Your CA-scraper bot will:
+
+1. Scan Solana for liquidity pools & tokens.
+2. Filter pools based on volume (using DexScreener).
+3. Get holder data from Helius (based on pairId).
+4. Analyze holders' percentages (to detect possible manipulations).
+5. Determine if a token is legit (Yes/No).
+6. Check buy transactions dominance (detect bot-driven volume).
+7. Send Telegram alerts when a token passes the check.
