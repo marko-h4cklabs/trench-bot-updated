@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// FetchWithRetry makes a request to the Helius RPC with retries
 func FetchWithRetry(url string, payload []byte, maxRetries int) (*http.Response, error) {
 	var resp *http.Response
 	var err error

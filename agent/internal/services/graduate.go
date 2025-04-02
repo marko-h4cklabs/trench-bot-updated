@@ -34,11 +34,6 @@ var graduatedTokenCache = struct {
 	Data map[string]time.Time
 }{Data: make(map[string]time.Time)}
 
-var swapCache = struct {
-	sync.Mutex
-	Data map[string][]float64
-}{Data: make(map[string][]float64)}
-
 var tokenCache = struct {
 	sync.Mutex
 	Tokens map[string]time.Time

@@ -93,6 +93,13 @@ func RegisterRoutes(router *gin.Engine, log *zap.SugaredLogger, appLogger *logge
 			TestHeliusConnection(c)
 		})
 
+		// NEW GET handler to prevent 404s on GET /webhook
+		api.GET("/webhook", func(c *gin.Context) {
+			log.Info("GET request to /webhook received (likely health check or bot)")
+			c.JSON(http.StatusOK, gin.H{"message": "Webhook endpoint ready. Use POST to send events."})
+		})
+
+		// Existing POST webhook handler
 		api.POST("/webhook", func(c *gin.Context) {
 			log.Info("Webhook endpoint received request")
 

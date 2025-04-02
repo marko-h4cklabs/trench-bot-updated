@@ -48,7 +48,7 @@ func InitTelegramBot() error {
 	log.Printf(" Telegram bot initialized successfully for @%s", userInfo.UserName)
 
 	// NOW send the test message, as 'bot' is confirmed non-nil
-	SendTelegramMessage(fmt.Sprintf("✅ Bot connected successfully (@%s). Ready to send notifications.", userInfo.UserName))
+	SendTelegramMessage(fmt.Sprintf("Bot connected successfully (@%s). Ready to send notifications.", userInfo.UserName))
 
 	return nil // Successful initialization
 }
