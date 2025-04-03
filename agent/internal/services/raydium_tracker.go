@@ -481,5 +481,18 @@ func sum(volumes []float64) float64 {
 
 func init() {
 	go ValidateCachedSwaps()
+	go ClearSwapCacheEvery1Hours()
 	log.Println("Raydium Tracker service initialized.")
+}
+
+func ClearSwapCacheEvery1Hours() {
+	for {
+		time.Sleep(1 * time.Hour)
+
+		swapCache.Lock()
+		swapCache.Data = make(map[string][]float64)
+		swapCache.Unlock()
+
+		log.Println("Cleared swapCache after 1 hours to purge inactive tokens.")
+	}
 }

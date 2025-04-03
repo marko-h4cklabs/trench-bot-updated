@@ -8,6 +8,7 @@ import (
 	"ca-scraper/agent/internal/bot"
 	"ca-scraper/agent/internal/handlers"
 	"ca-scraper/agent/internal/services"
+	"ca-scraper/agent/internal/tests"
 	"ca-scraper/shared/config"
 	"ca-scraper/shared/logger"
 
@@ -115,6 +116,7 @@ func main() {
 	}()
 
 	services.TestWebhookWithAuth()
+	tests.RunStartupTests()
 
 	startHeartbeat(appLogger)
 

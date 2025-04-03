@@ -2,7 +2,6 @@ package services
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,8 +14,6 @@ import (
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
 
-	"github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
 	"go.uber.org/zap"
 )
 
@@ -172,20 +169,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	tokenCache.Tokens[tokenAddress] = time.Now()
 	tokenCache.Unlock()
 
-	isRenounced, renouncedErr := IsMintRenounced(tokenAddress)
-	mintStatusStr := ""
-	if renouncedErr != nil {
-		mintStatusStr = "Mint Renounced: Check Failed"
-		log.Warn("Failed to check mint status", zap.String("tokenAddress", tokenAddress), zap.Error(renouncedErr))
-	} else {
-		if isRenounced {
-			mintStatusStr = "Mint Renounced: Yes"
-		} else {
-			mintStatusStr = "Mint Renounced: No"
-		}
-	}
-	log.Info("Mint status check result", zap.String("tokenAddress", tokenAddress), zap.String("status", mintStatusStr))
-
 	isLocked, lockedErr := CheckLiquidityLock(tokenAddress)
 	lockStatusStr := ""
 	if lockedErr != nil {
@@ -216,11 +199,9 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 			"CA: %s\n\n"+
 			"DexScreener: %s\n\n"+
 			"--- Info ---\n"+
-			"🔹 %s\n"+
 			"🔹 %s",
 		tokenAddress,
 		dexscreenerURL,
-		mintStatusStr,
 		lockStatusStr,
 	)
 
@@ -310,52 +291,6 @@ func extractTokenFromSwap(swapEvent map[string]interface{}) (string, bool) {
 	log.Println(" Could not extract token address from graduation event.")
 	log.Printf(" Full swap event data for debugging: %+v", swapEvent)
 	return "", false
-}
-
-func IsMintRenounced(mintAddress string) (bool, error) {
-	log.Printf("Checking mint status for %s", mintAddress)
-	client := rpc.New(os.Getenv("SOLANA_RPC_URL"))
-	if os.Getenv("SOLANA_RPC_URL") == "" {
-		client = rpc.New("https://api.mainnet-beta.solana.com")
-		log.Println("Warning: SOLANA_RPC_URL not set, using default public endpoint.")
-	}
-
-	mintPubKey, err := solana.PublicKeyFromBase58(mintAddress)
-	if err != nil {
-		log.Printf("Error: Invalid public key for mint check %s: %v", mintAddress, err)
-		return false, fmt.Errorf("invalid public key: %v", err)
-	}
-
-	accountInfo, err := client.GetAccountInfo(context.Background(), mintPubKey)
-	if err != nil {
-		log.Printf("Error: Failed to get account info for mint check %s: %v", mintAddress, err)
-		return false, fmt.Errorf("failed to get account info: %v", err)
-	}
-	if accountInfo == nil || accountInfo.Value == nil {
-		log.Printf("Error: No account info value returned for mint check %s", mintAddress)
-		return false, fmt.Errorf("account info or value is nil for mint %s", mintAddress)
-	}
-
-	binaryData := accountInfo.Value.Data.GetBinary()
-	if len(binaryData) == 0 {
-		log.Printf("Error: No data found in account info for mint: %s", mintAddress)
-		return false, fmt.Errorf("account data missing")
-	}
-	if len(binaryData) < 4 {
-		log.Printf("Error: Mint account data too short for mint authority option check: %s (len %d)", mintAddress, len(binaryData))
-		return false, fmt.Errorf("account data too short (%d bytes) for option field", len(binaryData))
-	}
-
-	mintAuthorityOption := binaryData[0]
-	isRenounced := mintAuthorityOption == 0
-
-	if isRenounced {
-		log.Printf("Info: Minting is RENOUNCED for token: %s", mintAddress)
-	} else {
-		log.Printf("Info: Minting is STILL POSSIBLE for token: %s", mintAddress)
-	}
-
-	return isRenounced, nil
 }
 
 func ValidateCachedTokens() {
