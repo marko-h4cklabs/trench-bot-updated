@@ -189,9 +189,15 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	}
 
 	log.Info("Token passed validation! Preparing notification...", zap.String("token", tokenAddress))
+
+	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
+	lockStatusStrEsc := notifications.EscapeMarkdownV2(lockStatusStr)
+
 	telegramMessage := fmt.Sprintf(
-		"🎓 Token Graduated & Validated! 🎓\n\nCA: `%s`\n\nDexScreener: %s\n\n--- Info ---\n🔹 %s",
-		tokenAddress, dexscreenerURL, lockStatusStr,
+		"Token Graduated & Validated\\! \n\nCA: `%s`\n\nDexScreener: %s\n\n\\-\\-\\- Info \\-\\-\\-\n %s",
+		tokenAddress,
+		dexscreenerURLEsc,
+		lockStatusStrEsc,
 	)
 	notifications.SendTelegramMessage(telegramMessage)
 	log.Info("Telegram notification initiated", zap.String("token", tokenAddress))

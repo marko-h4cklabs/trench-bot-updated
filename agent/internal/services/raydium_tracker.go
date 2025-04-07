@@ -171,8 +171,8 @@ func HandleTransactionWebhook(c *gin.Context) {
 	if err := json.Unmarshal(body, &transactions); err != nil {
 		var singleTransaction map[string]interface{}
 		bodyReader := bytes.NewReader(body)
-		if err := json.NewDecoder(bodyReader).Decode(&singleTransaction); err != nil {
-			log.Printf(" Invalid webhook JSON format (neither array nor single object): %v", err)
+		if decodeErr := json.NewDecoder(bodyReader).Decode(&singleTransaction); decodeErr != nil {
+			log.Printf(" Invalid webhook JSON format (neither array nor single object): %v", decodeErr)
 			log.Printf("Received Body: %s", string(body))
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format"})
 			return
@@ -185,6 +185,7 @@ func HandleTransactionWebhook(c *gin.Context) {
 	validatedCount := 0
 	for _, tx := range transactions {
 		if tx == nil {
+			log.Println("Skipping nil transaction in webhook payload.")
 			continue
 		}
 
@@ -198,20 +199,52 @@ func HandleTransactionWebhook(c *gin.Context) {
 		_, exists := seenTransactions.TxIDs[txSignature]
 		if exists {
 			seenTransactions.Unlock()
+			log.Printf("Transaction %s already seen, skipping.", txSignature)
 			continue
 		}
 		seenTransactions.TxIDs[txSignature] = struct{}{}
 		seenTransactions.Unlock()
+
 		var tokenMint string
-		if events, hasEvents := tx["events"].(map[string]interface{}); hasEvents {
-			if swapEvent, hasSwap := events["swap"].(map[string]interface{}); hasSwap {
-				if tokenOutputs, hasOutputs := swapEvent["tokenOutputs"].([]interface{}); hasOutputs {
-					for _, output := range tokenOutputs {
-						if outputMap, ok := output.(map[string]interface{}); ok {
-							mint, mintOk := outputMap["mint"].(string)
-							if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
-								tokenMint = mint
-								break
+		var foundMint bool
+		if transfers, hasTransfers := tx["tokenTransfers"].([]interface{}); hasTransfers {
+			for _, transfer := range transfers {
+				if transferMap, ok := transfer.(map[string]interface{}); ok {
+					mint, mintOk := transferMap["mint"].(string)
+					if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
+						tokenMint = mint
+						foundMint = true
+						break
+					}
+				}
+			}
+		}
+		if !foundMint {
+			if events, hasEvents := tx["events"].(map[string]interface{}); hasEvents {
+				if swapEvent, hasSwap := events["swap"].(map[string]interface{}); hasSwap {
+					if tokenOutputs, hasOutputs := swapEvent["tokenOutputs"].([]interface{}); hasOutputs {
+						for _, output := range tokenOutputs {
+							if outputMap, ok := output.(map[string]interface{}); ok {
+								mint, mintOk := outputMap["mint"].(string)
+								if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
+									tokenMint = mint
+									foundMint = true
+									break
+								}
+							}
+						}
+					}
+					if !foundMint {
+						if tokenInputs, hasInputs := swapEvent["tokenInputs"].([]interface{}); hasInputs {
+							for _, input := range tokenInputs {
+								if inputMap, ok := input.(map[string]interface{}); ok {
+									mint, mintOk := inputMap["mint"].(string)
+									if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
+										tokenMint = mint
+										foundMint = true
+										break
+									}
+								}
 							}
 						}
 					}
@@ -219,7 +252,7 @@ func HandleTransactionWebhook(c *gin.Context) {
 			}
 		}
 
-		if tokenMint == "" {
+		if !foundMint || tokenMint == "" {
 			log.Printf("Could not extract relevant non-SOL token mint from webhook transaction %s, skipping validation.", txSignature)
 			continue
 		}
@@ -228,10 +261,9 @@ func HandleTransactionWebhook(c *gin.Context) {
 
 		isValid, err := IsTokenValid(tokenMint)
 		if err != nil {
-			log.Printf("Error checking token %s (from tx %s): %v", tokenMint, txSignature, err)
+			log.Printf("Error checking token %s (from tx %s) with DexScreener: %v", tokenMint, txSignature, err)
 			continue
 		}
-
 		if !isValid {
 			log.Printf("Token %s (from tx %s) does not meet immediate criteria.", tokenMint, txSignature)
 			continue
@@ -240,12 +272,21 @@ func HandleTransactionWebhook(c *gin.Context) {
 		log.Printf("Valid Swap Detected via Webhook: Tx %s for token %s", txSignature, tokenMint)
 		validatedCount++
 
-		telegramMessage := fmt.Sprintf(" Hot Swap Validated! \nToken: %s\nDexScreener: https://dexscreener.com/solana/%s\nTx: https://solscan.io/tx/%s", tokenMint, tokenMint, txSignature)
+		dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenMint)
+
+		dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
+
+		telegramMessage := fmt.Sprintf(
+			"Hot Swap Validated\\! \nToken: `%s`\nDexScreener: %s\nTx: `%s`",
+			tokenMint,
+			dexscreenerLinkEsc,
+			txSignature,
+		)
 		notifications.SendTelegramMessage(telegramMessage)
 
 	}
 
-	log.Printf("Webhook handler finished. Immediately validated and notified: %d", validatedCount)
+	log.Printf("Webhook handler finished. Processed: %d transaction(s), Immediately validated & notified: %d", len(transactions), validatedCount)
 	c.JSON(http.StatusOK, gin.H{"status": "success", "processed": len(transactions), "validated_now": validatedCount})
 }
 
@@ -438,10 +479,9 @@ func TestWebhookWithAuth() {
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	log.Printf("📡 Test Webhook Response Status: %s", resp.Status)
-	log.Printf("📡 Test Webhook Response Body: %s", string(respBody))
+	log.Printf("Test Webhook Response Status: %s", resp.Status)
+	log.Printf("Test Webhook Response Body: %s", string(respBody))
 
-	// Add check for expected success status
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Test Webhook received non-OK status: %s", resp.Status)
 	} else {
@@ -475,8 +515,8 @@ func ValidateCachedSwaps() {
 		validatedCount := 0
 		failedCount := 0
 		for _, token := range tokensToValidate {
-			time.Sleep(1 * time.Second)
 
+			log.Printf("Checking cached token %s (Vol: $%.2f) via ValidateCachedSwaps loop.", token, volumeMap[token])
 			isValid, err := IsTokenValid(token)
 			if err != nil {
 				log.Printf(" Error checking token %s during ValidateCachedSwaps: %v", token, err)
@@ -487,9 +527,16 @@ func ValidateCachedSwaps() {
 			if isValid {
 				validatedCount++
 				log.Printf("Token %s (Vol: $%.2f) validated via ValidateCachedSwaps loop.", token, volumeMap[token])
-				telegramMessage := fmt.Sprintf("Tracking validated swap token: %s\nDexScreener: https://dexscreener.com/solana/%s", token, token)
-				notifications.SendTelegramMessage(telegramMessage)
 
+				dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", token)
+				dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
+
+				telegramMessage := fmt.Sprintf(
+					" Tracking validated swap token: `%s`\nDexScreener: %s",
+					token,
+					dexscreenerLinkEsc,
+				)
+				notifications.SendTelegramMessage(telegramMessage)
 				swapCache.Lock()
 				delete(swapCache.Data, token)
 				swapCache.Unlock()
@@ -497,10 +544,11 @@ func ValidateCachedSwaps() {
 			} else {
 				failedCount++
 				log.Printf("Token %s (Vol: $%.2f) failed validation via ValidateCachedSwaps loop.", token, volumeMap[token])
+
 				swapCache.Lock()
 				delete(swapCache.Data, token)
 				swapCache.Unlock()
-				log.Printf("   Removed failed token %s from cache.", token)
+				log.Printf("   Removed failed/invalid token %s from cache.", token)
 			}
 		}
 		log.Printf("ValidateCachedSwaps check complete. Validated: %d, Failed/Not Valid: %d", validatedCount, failedCount)

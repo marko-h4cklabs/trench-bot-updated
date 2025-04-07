@@ -55,7 +55,9 @@ func InitTelegramBot() error {
 	log.Printf("Telegram bot initialized successfully for @%s", userInfo.UserName)
 	log.Printf("Telegram rate limiter initialized (1 msg / 5 sec)")
 
-	SendSystemLogMessage(fmt.Sprintf(" Bot connected successfully (@%s). Ready.", userInfo.UserName))
+	escapedUsername := EscapeMarkdownV2(userInfo.UserName)
+	startupMessageFormatted := fmt.Sprintf("Bot connected successfully \\(@%s\\)\\. Ready\\.", escapedUsername)
+	SendSystemLogMessage(startupMessageFormatted)
 
 	return nil
 }
@@ -91,7 +93,7 @@ func LogTokenPair(pairAddress, url, baseToken, quoteToken string, liquidity, vol
  *5\-Min Volume:* \$%.2f
  *Buys:* %d \|  *Sells:* %d
  *Token Age:* %s`,
-		escapeMarkdownV2(pairAddress), escapeMarkdownV2(url), escapeMarkdownV2(baseToken), escapeMarkdownV2(quoteToken), liquidity, volume, buys, sells, escapeMarkdownV2(tokenAge),
+		EscapeMarkdownV2(pairAddress), EscapeMarkdownV2(url), EscapeMarkdownV2(baseToken), EscapeMarkdownV2(quoteToken), liquidity, volume, buys, sells, EscapeMarkdownV2(tokenAge),
 	)
 
 	SendTelegramMessage(message)
@@ -169,7 +171,7 @@ func sendMessageWithRetry(chatID int64, messageThreadID int, text string) {
 	log.Printf("ERROR: Telegram message failed to send after %d retries. Last Error: %v. %s", maxRetries, lastErr, logCtx)
 }
 
-func escapeMarkdownV2(s string) string {
+func EscapeMarkdownV2(s string) string {
 	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	temp := s
 	for _, char := range charsToEscape {
