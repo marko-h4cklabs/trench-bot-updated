@@ -63,10 +63,10 @@ func RunStartupTests() {
 	testHeliusAPI()
 
 	if testPassed {
-		log.Println("✅ Startup Test Passed: Notifying Telegram.")
-		sendTelegram("✅ All startup tests passed. Start scanning the markets.")
+		log.Println(" Startup Test Passed: Notifying Telegram.")
+		sendTelegram("All startup tests passed. Start scanning the markets.")
 	} else {
-		log.Println("❌ Webhook test failed.")
+		log.Println("Webhook test failed.")
 	}
 
 	log.Println("--- Startup Tests Complete ---")
@@ -174,8 +174,8 @@ func sendTelegram(message string) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Println("✅ Telegram notification sent.")
+		log.Println("Telegram notification sent.")
 	} else {
-		log.Printf("❌ Failed to send Telegram message. Status: %d", resp.StatusCode)
+		log.Printf("Failed to send Telegram message. Status: %d", resp.StatusCode)
 	}
 }

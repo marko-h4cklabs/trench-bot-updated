@@ -132,7 +132,7 @@ func (l *Logger) Info(msg string, keysAndValues ...interface{}) {
 func (l *Logger) Warn(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Warnw(msg, keysAndValues...)
 	// Format a simple string for Telegram
-	formattedMsg := fmt.Sprintf("⚠️ WARN: %s", msg)
+	formattedMsg := fmt.Sprintf(" WARN: %s", msg)
 	// Add fields to the string if needed for context
 	// (This part can get complex, keep it simple for now)
 	// for i := 0; i < len(keysAndValues); i+=2 { ... }
@@ -150,7 +150,7 @@ func (l *Logger) Error(msg string, keysAndValues ...interface{}) {
 			break                    // Take the first error found
 		}
 	}
-	formattedMsg := fmt.Sprintf("❗️ ERROR: %s", msg)
+	formattedMsg := fmt.Sprintf(" ERROR: %s", msg)
 	if errMsgText != "" {
 		formattedMsg = fmt.Sprintf("%s | Details: %s", formattedMsg, errMsgText)
 	}
@@ -172,7 +172,7 @@ func (l *Logger) Fatal(msg string, keysAndValues ...interface{}) {
 			break
 		}
 	}
-	formattedMsg := fmt.Sprintf("☠️ FATAL: %s", msg)
+	formattedMsg := fmt.Sprintf(" FATAL: %s", msg)
 	if errMsgText != "" {
 		formattedMsg = fmt.Sprintf("%s | Details: %s", formattedMsg, errMsgText)
 	}

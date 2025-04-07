@@ -1,120 +1,168 @@
 package notifications
 
 import (
+	"ca-scraper/shared/env"
 	"fmt"
 	"log"
-	"os"
-	"strconv"
+	"math"
+	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 var bot *tgbotapi.BotAPI
-var botToken string
-var groupID int64
+var isInitialized bool = false
 
 func InitTelegramBot() error {
-	botToken = os.Getenv("TELEGRAM_BOT_TOKEN")
-	groupIDStr := os.Getenv("TELEGRAM_GROUP_ID")
+	if isInitialized && bot != nil {
+		log.Println("INFO: Telegram bot already initialized.")
+		return nil
+	}
+
+	isInitialized = false
+	bot = nil
+
+	botToken := env.TelegramBotToken
+	groupID := env.TelegramGroupID
 
 	if botToken == "" {
-		return fmt.Errorf("TELEGRAM_BOT_TOKEN environment variable is missing")
+		return fmt.Errorf("critical error: TELEGRAM_BOT_TOKEN missing from env configuration")
 	}
-	if groupIDStr == "" {
-		return fmt.Errorf("TELEGRAM_GROUP_ID environment variable is missing")
+	if groupID == 0 {
+		return fmt.Errorf("critical error: TELEGRAM_GROUP_ID missing or invalid in env configuration")
 	}
 
+	log.Println("Initializing Telegram bot API...")
 	var err error
-	groupID, err = strconv.ParseInt(groupIDStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse TELEGRAM_GROUP_ID: %v", err)
-	}
 
-	// Initialize the bot API FIRST
 	bot, err = tgbotapi.NewBotAPI(botToken)
 	if err != nil {
-		// Bot initialization failed, set bot back to nil just in case
 		bot = nil
-		return fmt.Errorf("failed to initialize Telegram bot API: %v", err)
+		return fmt.Errorf("failed to initialize Telegram bot API: %w", err)
 	}
 
-	// Bot is potentially initialized, you can optionally verify with GetMe
+	log.Println("Verifying bot token with Telegram API (GetMe)...")
 	userInfo, err := bot.GetMe()
 	if err != nil {
-		bot = nil // Set back to nil if verification fails
-		return fmt.Errorf("failed to verify bot token with GetMe: %v", err)
+		bot = nil
+		return fmt.Errorf("failed to verify bot token with GetMe API call: %w", err)
 	}
-	log.Printf(" Telegram bot initialized successfully for @%s", userInfo.UserName)
+	isInitialized = true
+	log.Printf("Telegram bot initialized successfully for @%s", userInfo.UserName)
 
-	// NOW send the test message, as 'bot' is confirmed non-nil
-	SendTelegramMessage(fmt.Sprintf("Bot connected successfully (@%s). Ready to send notifications.", userInfo.UserName))
+	SendSystemLogMessage(fmt.Sprintf("Bot connected successfully (@%s). Ready.", userInfo.UserName))
 
-	return nil // Successful initialization
+	return nil
 }
 
-// SendTelegramMessage remains the same, but will now work during init
+func GetBotInstance() *tgbotapi.BotAPI {
+	if !isInitialized || bot == nil {
+		log.Println("WARN: GetBotInstance called but bot is not initialized or initialization failed.")
+	}
+	return bot
+}
+
 func SendTelegramMessage(message string) {
-	if bot == nil {
-		log.Println(" Error: Telegram bot is nil. Cannot send message.")
-		return
-	}
+	sendMessageWithRetry(env.TelegramGroupID, 0, message)
+}
 
-	msg := tgbotapi.NewMessage(groupID, message)
-	// Consider setting ParseMode globally or per message type if needed
-	// msg.ParseMode = tgbotapi.ModeMarkdown // Example: Enable Markdown
+func SendSystemLogMessage(message string) {
+	targetChatID := env.TelegramGroupID
+	targetThreadID := env.SystemLogsThreadID
 
-	// Simple retry logic (consider exponential backoff for production)
-	maxRetries := 3
-	for i := 0; i < maxRetries; i++ {
-		_, err := bot.Send(msg)
-		if err == nil {
-			log.Printf(" Telegram message sent successfully to group %d.", groupID)
-			return // Success
-		}
-
-		// Log specific Telegram errors if available
-		if tgErr, ok := err.(*tgbotapi.Error); ok {
-			log.Printf(" Failed to send Telegram message (Attempt %d/%d): API Error %d - %s", i+1, maxRetries, tgErr.Code, tgErr.Message)
-			// Check for specific retryable errors if necessary (e.g., 429 Too Many Requests)
-			if tgErr.Code == 429 {
-				retryAfter := tgErr.RetryAfter
-				if retryAfter <= 0 {
-					retryAfter = 2 // Default delay
-				}
-				log.Printf(" Rate limit hit (429). Retrying after %d seconds...", retryAfter)
-				time.Sleep(time.Duration(retryAfter) * time.Second)
-				continue // Continue to next retry attempt
-			}
-		} else {
-			// General network or other error
-			log.Printf(" Failed to send Telegram message (Attempt %d/%d): %v", i+1, maxRetries, err)
-		}
-
-		// Optional: Delay before retrying non-rate-limit errors
-		if i < maxRetries-1 {
-			time.Sleep(1 * time.Second)
-		}
-	}
-
-	log.Printf(" Error: Telegram message failed to send after %d retries.", maxRetries)
+	sendMessageWithRetry(targetChatID, targetThreadID, message)
 }
 
 func LogToTelegram(message string) {
-	SendTelegramMessage(message)
+	SendSystemLogMessage(message)
 }
 
 func LogTokenPair(pairAddress, url, baseToken, quoteToken string, liquidity, volume float64, buys, sells int, tokenAge string) {
 	message := fmt.Sprintf(
-		`🚀 *Token Pair Found!* 🚀
-📜 *Token Address:* [%s](%s)
-🔀 *Pair:* %s / %s
-💧 *Liquidity:* $%.2f
-💰 *5-Min Volume:* $%.2f
-🛒 *Buys:* %d, *Sells:* %d
-🕒 *Token Age:* %s`,
-		pairAddress, url, baseToken, quoteToken, liquidity, volume, buys, sells, tokenAge,
+		` *Token Pair Found\!* 
+ *Token Address:* [%s](%s)
+ *Pair:* %s / %s
+ *Liquidity:* \$%.2f
+ *5\-Min Volume:* \$%.2f
+ *Buys:* %d \|  *Sells:* %d
+ *Token Age:* %s`,
+		escapeMarkdownV2(pairAddress), escapeMarkdownV2(url), escapeMarkdownV2(baseToken), escapeMarkdownV2(quoteToken), liquidity, volume, buys, sells, escapeMarkdownV2(tokenAge),
 	)
 
 	SendTelegramMessage(message)
+}
+
+func sendMessageWithRetry(chatID int64, messageThreadID int, text string) {
+	if bot == nil {
+		log.Println("ERROR: Cannot send message, Telegram bot is not initialized.")
+		return
+	}
+	if chatID == 0 {
+		log.Println("ERROR: Cannot send message, target chatID is 0.")
+		return
+	}
+
+	logCtx := fmt.Sprintf("[ChatID: %d, ThreadID Attempted: %d]", chatID, messageThreadID)
+
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeMarkdownV2
+
+	if messageThreadID != 0 {
+		log.Printf("WARN: MessageThreadID feature potentially unavailable. Sending to main chat %d instead of thread %d. %s", chatID, messageThreadID, logCtx)
+	}
+
+	maxRetries := 3
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		_, err := bot.Send(msg)
+		if err == nil {
+			return
+		}
+
+		lastErr = err
+
+		if tgErr, ok := err.(*tgbotapi.Error); ok {
+			log.Printf("ERROR: Failed Telegram send (Attempt %d/%d): API Err %d - %s %s",
+				i+1, maxRetries, tgErr.Code, tgErr.Message, logCtx)
+
+			if tgErr.Code == 429 {
+				retryAfter := tgErr.RetryAfter
+				if retryAfter <= 0 {
+					retryAfter = 2
+				}
+				log.Printf("INFO: Rate limit hit (429). Retrying after %d seconds... %s", retryAfter, logCtx)
+				time.Sleep(time.Duration(retryAfter) * time.Second)
+				continue
+			}
+			if tgErr.Code == 400 && strings.Contains(tgErr.Message, "message thread not found") {
+				log.Printf("INFO: Ignoring 'message thread not found' error (MessageThreadID workaround active?). %s", logCtx)
+			}
+
+		} else {
+			log.Printf("ERROR: Failed Telegram send (Attempt %d/%d): %v %s",
+				i+1, maxRetries, err, logCtx)
+		}
+
+		if i < maxRetries-1 {
+			waitDuration := time.Duration(math.Pow(2, float64(i))) * time.Second
+			if waitDuration < time.Second {
+				waitDuration = time.Second
+			}
+			log.Printf("INFO: Retrying failed send in %v... %s", waitDuration, logCtx)
+			time.Sleep(waitDuration)
+		}
+	}
+
+	log.Printf("ERROR: Telegram message failed to send after %d retries. Last Error: %v. %s", maxRetries, lastErr, logCtx)
+}
+
+func escapeMarkdownV2(s string) string {
+	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	temp := s
+	for _, char := range charsToEscape {
+		temp = strings.ReplaceAll(temp, char, "\\"+char)
+	}
+	return temp
 }

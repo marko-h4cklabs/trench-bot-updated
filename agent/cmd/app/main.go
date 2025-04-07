@@ -1,7 +1,7 @@
 package main
 
 import (
-	"os"
+	"fmt"
 	"strings"
 	"time"
 
@@ -10,6 +10,7 @@ import (
 	"ca-scraper/agent/internal/services"
 	"ca-scraper/agent/internal/tests"
 	"ca-scraper/shared/config"
+	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
 
 	"github.com/gin-contrib/cors"
@@ -29,7 +30,7 @@ func startHeartbeat(appLogger *logger.Logger) {
 func main() {
 	defer func() {
 		if r := recover(); r != nil {
-			panicMsg := "Program crashed with panic: " + r.(string)
+			panicMsg := fmt.Sprintf("Program crashed with panic: %v", r)
 			println(panicMsg)
 		}
 	}()
@@ -40,63 +41,54 @@ func main() {
 		println(".env file successfully loaded.")
 	}
 
+	if err := env.LoadEnv(); err != nil {
+		println("Failed to load environment variables:", err.Error())
+		return
+	}
+
 	appLogger, err := logger.NewLogger("production", true)
 	if err != nil {
-		println(" Failed to initialize logger:", err.Error())
+		println("Failed to initialize logger:", err.Error())
 		return
 	}
-	println(" Logger initialized successfully.")
+	println("Logger initialized successfully.")
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "5555"
-		appLogger.Info(" PORT not set in .env, using default port 5555")
-	}
-
-	apiKey := os.Getenv("HELIUS_API_KEY")
-	webhookSecret := os.Getenv("WEBHOOK_SECRET")
-	webhookURL := os.Getenv("WEBHOOK_LISTENER_URL_DEV")
-	pumpFunAuthority := os.Getenv("PUMPFUN_AUTHORITY_ADDRESS")
-	addresses := os.Getenv("RAYDIUM_ACCOUNT_ADDRESSES")
-
-	if apiKey == "" || webhookSecret == "" || webhookURL == "" {
-		appLogger.Error(" ERROR: Missing one or more required environment variables (HELIUS_API_KEY, WEBHOOK_SECRET, or WEBHOOK_LISTENER_URL_DEV). Check .env file.")
-		return
-	}
-
-	addressList := strings.Split(addresses, ",")
-	if pumpFunAuthority != "" {
-		addressList = append(addressList, pumpFunAuthority)
-		println(" Added Pump.fun Authority Address: " + pumpFunAuthority)
+	addressList := strings.Split(env.RaydiumAccountAddresses, ",")
+	if env.PumpFunAuthority != "" {
+		addressList = append(addressList, env.PumpFunAuthority)
+		println("Added Pump.fun Authority Address:", env.PumpFunAuthority)
 	} else {
-		appLogger.Info(" Warning: PUMPFUN_AUTHORITY_ADDRESS is missing. Pump.fun graduations may not be tracked.")
+		appLogger.Info("PUMPFUN_AUTHORITY_ADDRESS is missing. Pump.fun graduations may not be tracked.")
 	}
-
-	println(" Final Address List for Webhook: " + strings.Join(addressList, ", "))
+	println("Final Address List for Webhook:", strings.Join(addressList, ", "))
 
 	cfg, err := config.LoadConfig("agent/config.yaml")
 	if err != nil {
-		appLogger.Error(" Failed to load configuration: " + err.Error())
+		appLogger.Error("Failed to load configuration: " + err.Error())
 		return
 	}
 	config.SetGlobalConfig(cfg)
 
 	println("Initializing Telegram Bot...")
 	if err := bot.InitializeBot(appLogger); err != nil {
-		appLogger.Error(" Failed to initialize Telegram Bot: " + err.Error())
+		appLogger.Error("Failed to initialize Telegram Bot: " + err.Error())
 		return
 	}
 
-	println(" Checking and creating Webhook (if necessary)...")
-	if !services.CreateHeliusWebhook(webhookURL) {
-		appLogger.Error(" Webhook creation failed")
+	println("Checking and creating Webhook (if necessary)...")
+	if !services.CreateHeliusWebhook(env.WebhookURL) {
+		appLogger.Error("Webhook creation failed")
 		return
 	}
 
-	found, _ := services.CheckExistingHeliusWebhook(apiKey, webhookURL)
-	if !found {
-		appLogger.Error(" Webhook verification failed")
+	found, err := services.CheckExistingHeliusWebhook(env.WebhookURL)
+	if err != nil {
+		appLogger.Warn("Failed to check existing webhook status", "error", err)
+	} else if !found {
+		appLogger.Error("Webhook verification failed")
 		return
+	} else {
+		appLogger.Info("Webhook existence confirmed.")
 	}
 
 	println("Running Webhook Startup Test...")
@@ -109,9 +101,9 @@ func main() {
 	handlers.RegisterRoutes(router, appLogger.ZapLogger, appLogger)
 
 	go func() {
-		println(" Server running on http://localhost:" + port)
-		if err := router.Run(":" + port); err != nil {
-			appLogger.Error(" Could not start server: " + err.Error())
+		println("Server running on http://localhost:" + env.Port)
+		if err := router.Run(":" + env.Port); err != nil {
+			appLogger.Error("Could not start server: " + err.Error())
 		}
 	}()
 

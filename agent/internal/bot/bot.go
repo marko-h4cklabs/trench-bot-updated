@@ -1,71 +1,52 @@
 package bot
 
 import (
-	"fmt"
-	"log"
-	"os"
-	"strconv"
-
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
+	"fmt"
+
+	"log"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/joho/godotenv"
+	"go.uber.org/zap"
 )
 
 var bot *tgbotapi.BotAPI
-var botToken string
-var groupID int64
-var systemLogsThreadID int
 var appLogger *logger.Logger
 
-func InitializeBot(log *logger.Logger) error {
-	appLogger = log
-	var err error
+func InitializeBot(logInstance *logger.Logger) error {
+	appLogger = logInstance
 
-	if err := godotenv.Load(".env"); err != nil {
-		println(".env file NOT found in the current directory.")
-	} else {
-		println(".env file successfully loaded.")
-	}
-
-	botToken = os.Getenv("TELEGRAM_BOT_TOKEN")
-	if botToken == "" {
-		return fmt.Errorf("TELEGRAM_BOT_TOKEN is missing in .env or system environment variables")
-	}
-
-	groupIDStr := os.Getenv("TELEGRAM_GROUP_ID")
-	if groupIDStr == "" {
-		return fmt.Errorf("TELEGRAM_GROUP_ID is missing in .env or system environment variables")
-	}
-
-	groupID, err = strconv.ParseInt(groupIDStr, 10, 64)
+	err := notifications.InitTelegramBot()
 	if err != nil {
-		return fmt.Errorf("Failed to parse TELEGRAM_GROUP_ID: %v", err)
+		appLogger.Error("Failed to initialize Telegram bot via notifications package", zap.Error(err))
+		return fmt.Errorf("failed to initialize Telegram bot: %w", err)
+	}
+	bot = notifications.GetBotInstance()
+	if bot == nil {
+		err := fmt.Errorf("failed to get bot instance from notifications package after initialization")
+		appLogger.Error(err.Error())
+		return err
 	}
 
-	systemLogsThreadIDStr := os.Getenv("SYSTEM_LOGS_THREAD_ID")
-	if systemLogsThreadIDStr != "" {
-		systemLogsThreadID, err = strconv.Atoi(systemLogsThreadIDStr)
-		if err != nil {
-			return fmt.Errorf("Failed to parse SYSTEM_LOGS_THREAD_ID: %v", err)
-		}
-	}
-
-	err = notifications.InitTelegramBot()
-	if err != nil {
-		return fmt.Errorf("Failed to initialize Telegram bot: %v", err)
-	}
-
-	println("Telegram bot initialized successfully.")
+	appLogger.Info("Telegram bot services initialized successfully for listening.")
 
 	return nil
 }
 
 func StartListening() {
 	if bot == nil {
-		log.Println(" Telegram bot not initialized. Skipping message listening.")
+		if appLogger != nil {
+			appLogger.Error("Telegram bot not initialized. Cannot start listening.")
+		} else {
+			log.Println("ERROR: Telegram bot not initialized. Cannot start listening.")
+		}
 		return
+	}
+	if appLogger != nil {
+		appLogger.Info("Starting Telegram bot message listener...")
+	} else {
+		log.Println("INFO: Starting Telegram bot message listener...")
 	}
 
 	u := tgbotapi.NewUpdate(0)
@@ -73,17 +54,31 @@ func StartListening() {
 
 	updates := bot.GetUpdatesChan(u)
 
+	if appLogger != nil {
+		appLogger.Info("Listening for Telegram commands and messages...")
+	} else {
+		log.Println("INFO: Listening for Telegram commands and messages...")
+	}
+
 	for update := range updates {
 		if update.Message != nil {
-			appLogger.Info(fmt.Sprintf(" Received message: %s", update.Message.Text))
+			if appLogger != nil {
+				appLogger.Debug("Received message",
+					zap.Int64("ChatID", update.Message.Chat.ID),
+					zap.String("From", update.Message.From.UserName),
+					zap.String("Text", update.Message.Text),
+				)
+			}
 
 			if update.Message.IsCommand() {
-				command := update.Message.Command()
-				args := update.Message.CommandArguments()
-				appLogger.Info(fmt.Sprintf(" Command '%s' called with args: %s", command, args))
-
 				HandleCommand(update)
 			}
 		}
+	}
+
+	if appLogger != nil {
+		appLogger.Info("Telegram bot update channel closed.")
+	} else {
+		log.Println("INFO: Telegram bot update channel closed.")
 	}
 }

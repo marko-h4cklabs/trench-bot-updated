@@ -2,17 +2,17 @@ package services
 
 import (
 	"bytes"
+	"ca-scraper/shared/env"
+	"ca-scraper/shared/logger"
+	"ca-scraper/shared/notifications"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+
 	"net/http"
-	"os"
 	"sync"
 	"time"
-
-	"ca-scraper/shared/logger"
-	"ca-scraper/shared/notifications"
 
 	"go.uber.org/zap"
 )
@@ -22,7 +22,7 @@ type WebhookRequest struct {
 	TransactionTypes []string `json:"transactionTypes"`
 	AccountAddresses []string `json:"accountAddresses"`
 	WebhookType      string   `json:"webhookType"`
-	TxnStatus        string   `json:"txnStatus"`
+	TxnStatus        string   `json:"txnStatus,omitempty"`
 	AuthHeader       string   `json:"authHeader"`
 }
 
@@ -36,31 +36,39 @@ var tokenCache = struct {
 	Tokens map[string]time.Time
 }{Tokens: make(map[string]time.Time)}
 
-func SetupGraduationWebhook(apiKey, webhookURL, pumpFunAuthority string, log *logger.Logger) error {
-	log.Info("Checking for existing Helius Webhook...")
+func SetupGraduationWebhook(webhookURL string, log *logger.Logger) error {
+	log.Info("Setting up Graduation Webhook...")
 
-	webhookSecret := os.Getenv("WEBHOOK_SECRET")
-	authHeader := os.Getenv("HELIUS_AUTH_HEADER")
-
+	apiKey := env.HeliusAPIKey
+	webhookSecret := env.WebhookSecret
+	authHeader := env.HeliusAuthHeader
+	pumpFunAuthority := env.PumpFunAuthority
+	if apiKey == "" {
+		log.Fatal("FATAL: HELIUS_API_KEY missing!")
+		return fmt.Errorf("missing HELIUS_API_KEY")
+	}
+	if pumpFunAuthority == "" {
+		log.Warn("PUMPFUN_AUTHORITY_ADDRESS missing!")
+		return fmt.Errorf("missing PUMPFUN_AUTHORITY_ADDRESS")
+	}
 	if webhookSecret == "" {
-		log.Info("WEBHOOK_SECRET is missing! Check .env file.")
+		log.Warn("WEBHOOK_SECRET missing!")
 	}
 	if authHeader == "" {
-		log.Info("HELIUS_AUTH_HEADER is missing! Check .env file.")
+		log.Info("HELIUS_AUTH_HEADER empty.")
 	}
 
-	existingWebhook, err := CheckExistingHeliusWebhook(apiKey, webhookURL)
+	log.Info("Checking for existing Graduation Helius Webhook...")
+	existingWebhook, err := CheckExistingHeliusWebhook(webhookURL)
 	if err != nil {
-		log.Error(fmt.Sprintf(" Failed to check existing webhook: %v", err))
+		log.Error("Failed check for existing webhook, attempting creation regardless.", zap.Error(err))
 	}
-
 	if existingWebhook {
-		log.Info("Webhook already exists. Skipping creation.")
+		log.Info("Graduation webhook already exists.", zap.String("url", webhookURL))
 		return nil
 	}
 
-	log.Info(" No existing webhook found. Creating a new one...")
-
+	log.Info("Creating new graduation webhook...")
 	requestBody := WebhookRequest{
 		WebhookURL:       webhookURL,
 		TransactionTypes: []string{"TRANSFER", "SWAP"},
@@ -71,70 +79,61 @@ func SetupGraduationWebhook(apiKey, webhookURL, pumpFunAuthority string, log *lo
 
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
-		log.Error(fmt.Sprintf("Failed to serialize webhook request: %v", err))
+		log.Error("Failed to serialize webhook request", zap.Error(err))
 		return err
 	}
 
 	url := fmt.Sprintf("https://api.helius.xyz/v0/webhooks?api-key=%s", apiKey)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		log.Error(fmt.Sprintf("Failed to create webhook request: %v", err))
+		log.Error("Failed to create webhook request", zap.Error(err))
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", webhookSecret)
 
-	client := &http.Client{}
+	req.Header.Set("Content-Type", "application/json")
+	if webhookSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+webhookSecret)
+	} else {
+		log.Warn("Cannot set Authorization header for webhook creation: WEBHOOK_SECRET missing.")
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Error(fmt.Sprintf("Failed to send webhook request: %v", err))
+		log.Error("Failed to send webhook request", zap.Error(err))
 		return err
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		log.Error(fmt.Sprintf("Failed to create webhook. Status: %d, Response: %s", resp.StatusCode, string(body)))
-		return fmt.Errorf("failed to create webhook")
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		log.Warn("Failed to read webhook creation response body", zap.Error(readErr))
 	}
 
-	log.Info("Webhook created successfully")
-	return nil
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Info("Webhook created successfully", zap.String("url", webhookURL))
+		return nil
+	} else {
+		log.Error("Failed to create graduation webhook.",
+			zap.Int("status", resp.StatusCode),
+			zap.String("response", string(body)))
+
+		return fmt.Errorf("failed to create graduation webhook: status %d, response body: %s", resp.StatusCode, string(body))
+	}
 }
 
-func CheckExistingHeliusWebhook(apiKey, webhookURL string) (bool, error) {
-	url := fmt.Sprintf("https://api.helius.xyz/v0/webhooks?api-key=%s", apiKey)
-	resp, err := http.Get(url)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var webhooks []map[string]interface{}
-	if err := json.Unmarshal(body, &webhooks); err != nil {
-		return false, err
-	}
-
-	for _, webhook := range webhooks {
-		if webhook["webhookURL"] == webhookURL {
-			log.Printf("Found existing webhook: %s", webhookURL)
-			log.Printf("Existing webhook details: %+v", webhook)
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-func HandleWebhook(payload []byte, authHeader string, log *logger.Logger) {
-	println(" Received Webhook Payload: %s", string(payload))
+func HandleWebhook(payload []byte, log *logger.Logger) {
+	log.Debug("Received Webhook Payload", zap.Int("size", len(payload)))
 	if len(payload) == 0 {
-		log.Error(" Empty webhook payload received!")
+		log.Error("Empty webhook payload received!")
+		return
 	}
+
 	var eventsArray []map[string]interface{}
 	if err := json.Unmarshal(payload, &eventsArray); err == nil {
-		for _, event := range eventsArray {
+		log.Debug("Webhook payload is an array.", zap.Int("count", len(eventsArray)))
+		for i, event := range eventsArray {
+			log.Debug("Processing event from array", zap.Int("index", i))
 			processGraduatedToken(event, log)
 		}
 		return
@@ -142,19 +141,18 @@ func HandleWebhook(payload []byte, authHeader string, log *logger.Logger) {
 
 	var event map[string]interface{}
 	if err := json.Unmarshal(payload, &event); err != nil {
-		log.Error(fmt.Sprintf("Failed to parse webhook payload: %v", err))
+		log.Error("Failed to parse webhook payload (neither array nor object)", zap.Error(err), zap.String("payload", string(payload)))
 		return
 	}
-
+	log.Debug("Webhook payload is a single event object. Processing...")
 	processGraduatedToken(event, log)
 }
 
 func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
-	log.Debug("Processing received event", zap.Any("event", event))
+	log.Debug("Processing event", zap.Any("event", event))
 
 	tokenAddress, ok := extractGraduatedToken(event)
 	if !ok {
-		log.Warn("Missing token address in event, cannot process.")
 		return
 	}
 
@@ -163,219 +161,215 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	tokenCache.Lock()
 	if _, exists := tokenCache.Tokens[tokenAddress]; exists {
 		tokenCache.Unlock()
-		log.Debug("Token already processed recently, skipping debounce.", zap.String("tokenAddress", tokenAddress))
+		log.Info("Token already processed recently, skipping.", zap.String("tokenAddress", tokenAddress))
 		return
 	}
 	tokenCache.Tokens[tokenAddress] = time.Now()
 	tokenCache.Unlock()
-
+	log.Info("Added token to processing debounce cache", zap.String("tokenAddress", tokenAddress))
 	isLocked, lockedErr := CheckLiquidityLock(tokenAddress)
-	lockStatusStr := ""
+	isValid, validationErr := IsTokenValid(tokenAddress)
+	lockStatusStr := "Liquidity Locked (>1k): Unknown"
 	if lockedErr != nil {
 		lockStatusStr = "Liquidity Locked (>1k): Check Failed"
-		log.Warn("Failed to check liquidity lock status", zap.String("tokenAddress", tokenAddress), zap.Error(lockedErr))
+		log.Warn("Failed liquidity lock check", zap.String("token", tokenAddress), zap.Error(lockedErr))
 	} else {
-		if isLocked {
-			lockStatusStr = "Liquidity Locked (>1k): Yes"
-		} else {
-			lockStatusStr = "Liquidity Locked (>1k): No / Unavailable"
-		}
+		lockStatusStr = fmt.Sprintf("Liquidity Locked (>1k): %t", isLocked)
 	}
-	log.Info("Liquidity lock check result", zap.String("tokenAddress", tokenAddress), zap.String("status", lockStatusStr))
+	log.Info("Liquidity lock check result", zap.String("token", tokenAddress), zap.String("status", lockStatusStr), zap.Bool("isLocked", isLocked))
 
-	isValid, validationErr := IsTokenValid(tokenAddress)
 	if validationErr != nil {
-		log.Error("Error checking DexScreener criteria", zap.String("tokenAddress", tokenAddress), zap.Error(validationErr))
+		log.Error("Error checking DexScreener criteria", zap.String("token", tokenAddress), zap.Error(validationErr))
 		return
 	}
 	if !isValid {
-		log.Info("Token failed mandatory DexScreener criteria. No notification sent.", zap.String("tokenAddress", tokenAddress))
+		log.Info("Token failed DexScreener criteria", zap.String("token", tokenAddress))
 		return
 	}
-	log.Info("Token passed DexScreener validation criteria! Preparing notification...", zap.String("tokenAddress", tokenAddress))
 
+	log.Info("Token passed validation! Preparing notification...", zap.String("token", tokenAddress))
 	telegramMessage := fmt.Sprintf(
-		"Validated Token Found!\n\n"+
-			"CA: %s\n\n"+
-			"DexScreener: %s\n\n"+
-			"--- Info ---\n"+
-			"🔹 %s",
-		tokenAddress,
-		dexscreenerURL,
-		lockStatusStr,
+		"🎓 Token Graduated & Validated! 🎓\n\nCA: `%s`\n\nDexScreener: %s\n\n--- Info ---\n🔹 %s",
+		tokenAddress, dexscreenerURL, lockStatusStr,
 	)
-
 	notifications.SendTelegramMessage(telegramMessage)
-
-	log.Info("Telegram notification send attempt initiated", zap.String("tokenAddress", tokenAddress))
+	log.Info("Telegram notification initiated", zap.String("token", tokenAddress))
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
-	log.Info("Added token to graduatedTokenCache", zap.String("tokenAddress", tokenAddress))
+	log.Info("Added token to graduatedTokenCache", zap.String("token", tokenAddress))
 	TrackGraduatedToken(tokenAddress)
+
 }
 
 func extractGraduatedToken(event map[string]interface{}) (string, bool) {
+	if transfers, hasTransfers := event["tokenTransfers"].([]interface{}); hasTransfers {
+		for _, transfer := range transfers {
+			if transferMap, ok := transfer.(map[string]interface{}); ok {
+				mint, mintOk := transferMap["mint"].(string)
+				if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
+					log.Printf("Extracted Token Address from tokenTransfers: %s", mint)
+					return mint, true
+				}
+			}
+		}
+	}
+	if events, hasEvents := event["events"].(map[string]interface{}); hasEvents {
+		if tokenMint, ok := extractTokenFromEvents(events); ok {
+			log.Printf("Extracted Token Address from Events: %s", tokenMint)
+			return tokenMint, true
+		}
+	}
 	if transaction, hasTransaction := event["transaction"].(map[string]interface{}); hasTransaction {
 		if tokenMint, ok := extractTokenFromTransaction(transaction); ok {
 			log.Printf("Extracted Token Address from Transaction: %s", tokenMint)
 			return tokenMint, true
 		}
 	}
-
-	if events, hasEvents := event["events"].(map[string]interface{}); hasEvents {
-		if tokenMint, ok := extractTokenFromEvents(events); ok {
-			log.Printf(" Extracted Token Address from Events: %s", tokenMint)
-			return tokenMint, true
-		}
-	}
-
-	log.Println("Could not extract token address from graduation event.")
-	log.Printf("Full event data for debugging: %+v", event)
+	log.Println("Could not extract target token address from graduation event.")
 	return "", false
 }
 
 func extractTokenFromTransaction(transaction map[string]interface{}) (string, bool) {
-	events, hasEvents := transaction["events"].(map[string]interface{})
-	if !hasEvents {
-		log.Println("No 'events' found inside 'transaction'")
-		return "", false
+	if events, hasEvents := transaction["events"].(map[string]interface{}); hasEvents {
+		return extractTokenFromEvents(events)
 	}
-
-	swapEvent, hasSwap := events["swap"].(map[string]interface{})
-	if !hasSwap {
-		log.Println("No 'swap' event found inside 'transaction'")
-		return "", false
-	}
-
-	return extractTokenFromSwap(swapEvent)
+	return "", false
 }
 
 func extractTokenFromEvents(events map[string]interface{}) (string, bool) {
-	swapEvent, hasSwap := events["swap"].(map[string]interface{})
-	if !hasSwap {
-		log.Println(" No 'swap' event found inside 'events'")
-		return "", false
+	if swapEvent, hasSwap := events["swap"].(map[string]interface{}); hasSwap {
+		return extractTokenFromSwap(swapEvent)
 	}
-
-	return extractTokenFromSwap(swapEvent)
+	return "", false
 }
 
 func extractTokenFromSwap(swapEvent map[string]interface{}) (string, bool) {
-	tokenOutputs, hasTokenOutputs := swapEvent["tokenOutputs"].([]interface{})
-	if hasTokenOutputs && len(tokenOutputs) > 0 {
-		firstOutput, ok := tokenOutputs[0].(map[string]interface{})
-		if ok {
-			tokenMint, mintExists := firstOutput["mint"].(string)
-			if mintExists && tokenMint != "" {
-				log.Printf(" Found token address from tokenOutputs: %s", tokenMint)
-				return tokenMint, true
+	if tokenOutputs, has := swapEvent["tokenOutputs"].([]interface{}); has {
+		for _, output := range tokenOutputs {
+			if outputMap, ok := output.(map[string]interface{}); ok {
+				if mint, mintOk := outputMap["mint"].(string); mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
+					log.Printf("Found non-SOL token from tokenOutputs: %s", mint)
+					return mint, true
+				}
 			}
 		}
 	}
-
-	log.Println(" No 'tokenOutputs' found. Trying 'tokenInputs' instead...")
-
-	tokenInputs, hasTokenInputs := swapEvent["tokenInputs"].([]interface{})
-	if hasTokenInputs && len(tokenInputs) > 0 {
-		firstInput, ok := tokenInputs[0].(map[string]interface{})
-		if ok {
-			tokenMint, mintExists := firstInput["mint"].(string)
-			if mintExists && tokenMint != "" {
-				log.Printf(" Found token address from tokenInputs: %s", tokenMint)
-				return tokenMint, true
+	if tokenInputs, has := swapEvent["tokenInputs"].([]interface{}); has {
+		for _, input := range tokenInputs {
+			if inputMap, ok := input.(map[string]interface{}); ok {
+				if mint, mintOk := inputMap["mint"].(string); mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
+					log.Printf("Found non-SOL token from tokenInputs: %s", mint)
+					return mint, true
+				}
 			}
 		}
 	}
-
-	log.Println(" Could not extract token address from graduation event.")
-	log.Printf(" Full swap event data for debugging: %+v", swapEvent)
+	log.Println("Could not extract non-SOL token address from swap event.")
 	return "", false
 }
 
 func ValidateCachedTokens() {
-	for {
-		time.Sleep(5 * time.Minute)
-
+	validationInterval := 5 * time.Minute
+	cacheExpiry := 30 * time.Minute
+	log.Printf("Periodic graduated token validation routine started (Interval: %v, Expiry: %v)", validationInterval, cacheExpiry)
+	ticker := time.NewTicker(validationInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		log.Println("Running periodic graduated token validation check...")
+		tokensToRemove := []string{}
+		tokensToValidate := []string{}
 		graduatedTokenCache.Lock()
 		for token, addedTime := range graduatedTokenCache.Data {
-			if time.Since(addedTime) > 30*time.Minute {
-				delete(graduatedTokenCache.Data, token)
-				continue
-			}
-
-			isValid, err := IsTokenValid(token)
-			if err != nil {
-				log.Printf(" Error checking token: %v", err)
-				continue
-			}
-
-			if isValid {
-				telegramMessage := fmt.Sprintf(" Tracking validated graduated token: %s\n DexScreener: https://dexscreener.com/solana/%s", token, token)
-				log.Println(telegramMessage)
+			if time.Since(addedTime) > cacheExpiry {
+				tokensToRemove = append(tokensToRemove, token)
+			} else {
+				tokensToValidate = append(tokensToValidate, token)
 			}
 		}
+		for _, token := range tokensToRemove {
+			delete(graduatedTokenCache.Data, token)
+			log.Printf("[DEBUG] Removed expired token: %s", token)
+		}
 		graduatedTokenCache.Unlock()
+		log.Printf("Checking %d non-expired graduated tokens.", len(tokensToValidate))
+		validatedCount := 0
+		for _, token := range tokensToValidate {
+			time.Sleep(500 * time.Millisecond)
+			isValid, err := IsTokenValid(token)
+			if err != nil {
+				log.Printf("[WARN] Error validating %s: %v", token, err)
+				continue
+			}
+			if isValid {
+				validatedCount++
+				log.Printf("[INFO] Token %s remains valid.", token)
+			} else {
+				log.Printf("[INFO] Token %s no longer valid.", token)
+			}
+		}
+		log.Printf("Periodic validation check complete. Validated now: %d", validatedCount)
 	}
 }
 
 func init() {
-	go ValidateCachedTokens()
+	log.Println("Initializing Graduation Service background tasks...")
 }
 
 func CheckLiquidityLock(mintAddress string) (bool, error) {
-	url := fmt.Sprintf("https://api.dexscreener.com/tokens/v1/solana/%s/liquidity", mintAddress)
-	log.Printf("Checking liquidity lock for %s at %s", mintAddress, url)
+	url := fmt.Sprintf("https://api.dexscreener.com/v1/solana/tokens/%s", mintAddress)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
 		log.Printf("Error: Liquidity check API request failed for %s: %v", mintAddress, err)
-		return false, fmt.Errorf("API request failed: %v", err)
+		return false, fmt.Errorf("API req failed: %v", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode == 404 {
-		log.Printf("Info: Liquidity lock info not available via DexScreener for %s (404). Treating as unlocked.", mintAddress)
+		log.Printf("Info: Liquidity info N/A via DexScreener for %s (404).", mintAddress)
 		return false, nil
-	} else if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("Error: Liquidity check API request failed for %s with status: %s. Body: %s", mintAddress, resp.Status, string(bodyBytes))
-		return false, fmt.Errorf("API request failed with status: %s", resp.Status)
 	}
-
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("Error: Liquidity check API req failed for %s status: %s. Body: %s", mintAddress, resp.Status, string(bodyBytes))
+		return false, fmt.Errorf("API req failed status: %s", resp.Status)
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Error: reading liquidity API response for %s: %v", mintAddress, err)
-		return false, fmt.Errorf("error reading API response: %v", err)
+		log.Printf("Error reading liquidity API response for %s: %v", mintAddress, err)
+		return false, fmt.Errorf("err reading API resp: %v", err)
 	}
-
-	var liquidityData []struct {
-		PairAddress string `json:"pairAddress"`
-		Liquidity   struct {
-			Usd   float64 `json:"usd"`
-			Base  float64 `json:"base"`
-			Quote float64 `json:"quote"`
-		} `json:"liquidity"`
+	var tokenInfo struct {
+		Pairs []struct {
+			Liquidity *struct {
+				Usd float64 `json:"usd"`
+			} `json:"liquidity"`
+		} `json:"pairs"`
 	}
-
-	err = json.Unmarshal(body, &liquidityData)
+	err = json.Unmarshal(body, &tokenInfo)
 	if err != nil {
-		log.Printf("Error: JSON parsing failed for liquidity response %s: %v. Raw: %s", mintAddress, err, string(body))
+		log.Printf("Error: JSON parsing failed for liquidity resp %s: %v. Raw: %s", mintAddress, err, string(body))
 		return false, fmt.Errorf("JSON parsing failed: %v", err)
 	}
-
-	if len(liquidityData) == 0 {
-		log.Printf("Info: No liquidity data array returned from DexScreener for token: %s. Treating as unlocked.", mintAddress)
+	if len(tokenInfo.Pairs) == 0 {
+		log.Printf("Info: No pairs in DexScreener info for %s.", mintAddress)
 		return false, nil
 	}
-
-	pair := liquidityData[0]
-	isLocked := pair.Liquidity.Usd > 1000
-
-	if isLocked {
-		log.Printf("Info: Liquidity appears LOCKED for token: %s (>$1000 USD: %.2f)", mintAddress, pair.Liquidity.Usd)
-	} else {
-		log.Printf("Info: Liquidity IS NOT locked for token: %s (<=$1000 USD: %.2f)", mintAddress, pair.Liquidity.Usd)
+	highestLiquidity := 0.0
+	foundLiquidity := false
+	for _, pair := range tokenInfo.Pairs {
+		if pair.Liquidity != nil {
+			foundLiquidity = true
+			if pair.Liquidity.Usd > highestLiquidity {
+				highestLiquidity = pair.Liquidity.Usd
+			}
+		}
 	}
+	if !foundLiquidity {
+		log.Printf("Info: No liquidity data in pairs for %s.", mintAddress)
+		return false, nil
+	}
+	const liquidityLockThreshold = 1000.0
+	isLocked := highestLiquidity > liquidityLockThreshold
 	return isLocked, nil
 }

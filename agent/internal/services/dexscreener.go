@@ -70,7 +70,6 @@ func IsTokenValid(tokenCA string) (bool, error) {
 	}
 	defer resp.Body.Close()
 
-	// --- Handle Status Codes ---
 	if resp.StatusCode == http.StatusTooManyRequests {
 		log.Printf("Rate limit exceeded (429) checking %s. Consider adding delays or exponential backoff.", tokenCA)
 		return false, fmt.Errorf("rate limit exceeded (429)")

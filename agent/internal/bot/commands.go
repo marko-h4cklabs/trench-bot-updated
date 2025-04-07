@@ -1,22 +1,32 @@
 package bot
 
 import (
-	"fmt"
-	"os"
-	"strings"
-
 	"ca-scraper/agent/database"
 	"ca-scraper/agent/internal/models"
-	"ca-scraper/agent/internal/services"
+	"fmt"
+	"log"
+
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"go.uber.org/zap"
 )
 
 func HandleCommand(update tgbotapi.Update) {
 	command := update.Message.Command()
 	args := update.Message.CommandArguments()
 
-	appLogger.Info(fmt.Sprintf("Processing command '%s' with args: %s", command, args))
+	if appLogger == nil {
+		log.Printf("ERROR: appLogger not initialized in bot package when handling command '%s'", command)
+		return
+	}
+
+	appLogger.Info("Processing command",
+		zap.String("command", command),
+		zap.String("args", args),
+		zap.Int64("ChatID", update.Message.Chat.ID),
+		zap.String("User", update.Message.From.UserName),
+	)
 
 	switch command {
 	case "whitelist":
@@ -25,11 +35,11 @@ func HandleCommand(update tgbotapi.Update) {
 		handleWalletUpdateCommand(update, args)
 	case "walletdelete":
 		handleWalletDeleteCommand(update, args)
-	case "checkwallet":
-		handleCheckWalletCommand(update, args)
+	case "start", "help":
+		handleHelpCommand(update)
 	default:
-		appLogger.Info(fmt.Sprintf("Unknown command '%s' received", command))
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("Unknown command: %s", command))
+		appLogger.Warn("Unknown command received", zap.String("command", command))
+		SendReply(update.Message.Chat.ID, fmt.Sprintf(" Unknown command: /%s", command))
 	}
 }
 
@@ -37,33 +47,33 @@ func handleWhitelistCommand(update tgbotapi.Update, args string) {
 	wallet := strings.TrimSpace(args)
 	if wallet == "" {
 		SendReply(update.Message.Chat.ID, "Usage: /whitelist {wallet-address}")
-		appLogger.Info("Whitelist command failed: no wallet address provided")
+		appLogger.Warn("Whitelist command failed: no wallet address provided")
 		return
 	}
 
 	var user models.User
 	result := database.DB.Where("wallet_id = ?", wallet).First(&user)
 	if result.RowsAffected > 0 {
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s is already whitelisted!", wallet))
-		appLogger.Info(fmt.Sprintf("Whitelist command failed: wallet %s already whitelisted", wallet))
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` is already whitelisted!", wallet))
+		appLogger.Info("Whitelist command failed: wallet already whitelisted", zap.String("wallet", wallet))
 		return
 	}
 
 	newUser := models.User{WalletID: wallet, NFTStatus: false}
 	if err := database.DB.Create(&newUser).Error; err != nil {
 		SendReply(update.Message.Chat.ID, "An error occurred while whitelisting the wallet.")
-		appLogger.Error(fmt.Sprintf("Whitelist command failed: error adding wallet %s to the database: %v", wallet, err))
+		appLogger.Error("Whitelist command failed: error adding wallet to DB", zap.String("wallet", wallet), zap.Error(err))
 		return
 	}
 
-	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s has been whitelisted!", wallet))
-	appLogger.Info(fmt.Sprintf("Wallet %s successfully whitelisted", wallet))
+	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` has been whitelisted!", wallet))
+	appLogger.Info("Wallet successfully whitelisted", zap.String("wallet", wallet))
 }
 
 func handleWalletUpdateCommand(update tgbotapi.Update, args string) {
 	parts := strings.Fields(args)
 	if len(parts) != 2 {
-		SendReply(update.Message.Chat.ID, "Usage: /walletupdate {current-wallet-address} {updated-wallet-address}")
+		SendReply(update.Message.Chat.ID, "Usage: /walletupdate {current-wallet-address} {new-wallet-address}")
 		return
 	}
 
@@ -73,82 +83,72 @@ func handleWalletUpdateCommand(update tgbotapi.Update, args string) {
 	var user models.User
 	result := database.DB.Where("wallet_id = ?", currentWallet).First(&user)
 	if result.RowsAffected == 0 {
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s is not in the whitelist.", currentWallet))
-		appLogger.Info(fmt.Sprintf("Wallet update failed: wallet %s not found", currentWallet))
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` is not in the whitelist.", currentWallet))
+		appLogger.Warn("Wallet update failed: current wallet not found", zap.String("currentWallet", currentWallet))
 		return
 	}
 
 	user.WalletID = updatedWallet
 	if err := database.DB.Save(&user).Error; err != nil {
-		appLogger.Error(fmt.Sprintf("Wallet update failed: error updating wallet %s to %s: %v", currentWallet, updatedWallet, err))
-		SendReply(update.Message.Chat.ID, "An error occurred while updating the wallet.")
+		appLogger.Error("Wallet update failed: error saving updated wallet", zap.String("currentWallet", currentWallet), zap.String("newWallet", updatedWallet), zap.Error(err))
+		SendReply(update.Message.Chat.ID, " An error occurred while updating the wallet.")
 		return
 	}
 
-	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s has been updated to %s!", currentWallet, updatedWallet))
-	appLogger.Info(fmt.Sprintf("Wallet %s successfully updated to %s", currentWallet, updatedWallet))
+	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` has been updated to `%s`!", currentWallet, updatedWallet))
+	appLogger.Info("Wallet successfully updated", zap.String("currentWallet", currentWallet), zap.String("newWallet", updatedWallet))
 }
 
 func handleWalletDeleteCommand(update tgbotapi.Update, args string) {
 	wallet := strings.TrimSpace(args)
 	if wallet == "" {
-		SendReply(update.Message.Chat.ID, "Usage: /walletdelete {wallet-address}")
+		SendReply(update.Message.Chat.ID, " Usage: /walletdelete {wallet-address}")
 		return
 	}
 
-	var user models.User
-	result := database.DB.Where("wallet_id = ?", wallet).First(&user)
-	if result.RowsAffected == 0 {
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s is not in the whitelist.", wallet))
-		appLogger.Info(fmt.Sprintf("Wallet delete failed: wallet %s not found", wallet))
-		return
-	}
-
-	if err := database.DB.Delete(&user).Error; err != nil {
-		appLogger.Error(fmt.Sprintf("Wallet delete failed: error deleting wallet %s: %v", wallet, err))
+	result := database.DB.Where("wallet_id = ?", wallet).Delete(&models.User{})
+	if result.Error != nil {
+		appLogger.Error("Wallet delete failed: error deleting wallet", zap.String("wallet", wallet), zap.Error(result.Error))
 		SendReply(update.Message.Chat.ID, "An error occurred while deleting the wallet.")
 		return
 	}
 
-	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet %s has been removed from the whitelist!", wallet))
-	appLogger.Info(fmt.Sprintf("Wallet %s successfully deleted", wallet))
+	if result.RowsAffected == 0 {
+		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` is not in the whitelist.", wallet))
+		appLogger.Warn("Wallet delete failed: wallet not found", zap.String("wallet", wallet))
+		return
+	}
+
+	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` has been removed from the whitelist!", wallet))
+	appLogger.Info("Wallet successfully deleted", zap.String("wallet", wallet))
 }
 
-func handleCheckWalletCommand(update tgbotapi.Update, args string) {
-	walletAddress := strings.TrimSpace(args)
-	if walletAddress == "" {
-		SendReply(update.Message.Chat.ID, "Usage: /checkwallet {wallet-address}")
-		return
-	}
-
-	trenchDemonCollection := os.Getenv("TRENCH_DEMON_COLLECTION")
-	if trenchDemonCollection == "" {
-		SendReply(update.Message.Chat.ID, "Server configuration error: Missing Trench Demon Collection ID.")
-		appLogger.Error("Check wallet failed: missing TRENCH_DEMON_COLLECTION")
-		return
-	}
-
-	heliusAPIKey := os.Getenv("HELIUS_API_KEY")
-	ownsNFT, err := services.CheckTokenOwnership(heliusAPIKey, walletAddress, trenchDemonCollection)
-
-	if err != nil {
-		appLogger.Error(fmt.Sprintf("Check wallet failed: error checking ownership for %s: %v", walletAddress, err))
-		SendReply(update.Message.Chat.ID, "An error occurred while checking wallet ownership.")
-		return
-	}
-
-	if ownsNFT {
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("Yes, the wallet %s holds a Trench Demon NFT.", walletAddress))
-		appLogger.Info(fmt.Sprintf("Wallet %s owns a Trench Demon NFT", walletAddress))
-	} else {
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("No, the wallet %s does not hold a Trench Demon NFT.", walletAddress))
-		appLogger.Info(fmt.Sprintf("Wallet %s does not own a Trench Demon NFT", walletAddress))
-	}
+func handleHelpCommand(update tgbotapi.Update) {
+	helpText := `Available commands:
+/whitelist {wallet} - Add wallet to whitelist.
+/walletupdate {current} {new} - Update whitelisted wallet.
+/walletdelete {wallet} - Remove wallet from whitelist.
+/checkwallet {wallet} - Check if wallet holds Trench Demon NFT.
+/help - Show this help message.`
+	SendReply(update.Message.Chat.ID, helpText)
 }
 
 func SendReply(chatID int64, text string) {
+	if bot == nil {
+		log.Println("ERROR: Cannot send reply, bot is not initialized.")
+		if appLogger != nil {
+			appLogger.Error("Cannot send reply, bot is not initialized.")
+		}
+		return
+	}
 	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeMarkdown
+
 	if _, err := bot.Send(msg); err != nil {
-		appLogger.Error(fmt.Sprintf("Failed to send reply: %v", err))
+		if appLogger != nil {
+			appLogger.Error("Failed to send reply message", zap.Error(err), zap.Int64("chatID", chatID))
+		} else {
+			log.Printf("ERROR: Failed to send reply: %v", err)
+		}
 	}
 }
