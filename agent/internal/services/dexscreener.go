@@ -18,7 +18,7 @@ const (
 	dexScreenerAPI = "https://api.dexscreener.com/tokens/v1/solana"
 
 	minLiquidity = 40000.0
-	minMarketCap = 50000.0
+	minMarketCap = 25000.0
 	maxMarketCap = 250000.0
 	min5mVolume  = 1000.0
 	min1hVolume  = 10000.0
