@@ -5,6 +5,7 @@ import (
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -317,28 +318,44 @@ func init() {
 }
 
 func CheckLiquidityLock(mintAddress string) (bool, error) {
+	if err := dexScreenerLimiter.Wait(context.Background()); err != nil {
+		log.Printf("ERROR: DexScreener rate limiter wait error during liquidity check for %s: %v", mintAddress, err)
+
+	}
 	url := fmt.Sprintf("https://api.dexscreener.com/v1/solana/tokens/%s", mintAddress)
 	client := &http.Client{Timeout: 10 * time.Second}
+
 	resp, err := client.Get(url)
 	if err != nil {
 		log.Printf("Error: Liquidity check API request failed for %s: %v", mintAddress, err)
-		return false, fmt.Errorf("API req failed: %v", err)
+		return false, fmt.Errorf("API req failed for %s: %w", mintAddress, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == 404 {
-		log.Printf("Info: Liquidity info N/A via DexScreener for %s (404).", mintAddress)
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		log.Printf("Rate limit hit (429) during liquidity check for %s.", mintAddress)
+		return false, fmt.Errorf("rate limit exceeded (429)")
+	} else if resp.StatusCode == http.StatusNotFound {
+		log.Printf("Info: Liquidity info N/A via DexScreener for %s (404). Assuming not locked.", mintAddress)
 		return false, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("Error: Liquidity check API req failed for %s status: %s. Body: %s", mintAddress, resp.Status, string(bodyBytes))
+	} else if resp.StatusCode != http.StatusOK {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		errorMsg := fmt.Sprintf("Liquidity check API request failed for %s status: %s", mintAddress, resp.Status)
+		if readErr == nil && len(bodyBytes) > 0 {
+			errorMsg += fmt.Sprintf(". Body: %s", string(bodyBytes))
+		} else if readErr != nil {
+			errorMsg += fmt.Sprintf(". Failed to read response body: %v", readErr)
+		}
+		log.Println(errorMsg)
 		return false, fmt.Errorf("API req failed status: %s", resp.Status)
 	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Error reading liquidity API response for %s: %v", mintAddress, err)
-		return false, fmt.Errorf("err reading API resp: %v", err)
+		log.Printf("Error reading liquidity API response body for %s: %v", mintAddress, err)
+		return false, fmt.Errorf("err reading API resp for %s: %w", mintAddress, err)
 	}
+
 	var tokenInfo struct {
 		Pairs []struct {
 			Liquidity *struct {
@@ -346,30 +363,39 @@ func CheckLiquidityLock(mintAddress string) (bool, error) {
 			} `json:"liquidity"`
 		} `json:"pairs"`
 	}
+
 	err = json.Unmarshal(body, &tokenInfo)
 	if err != nil {
-		log.Printf("Error: JSON parsing failed for liquidity resp %s: %v. Raw: %s", mintAddress, err, string(body))
-		return false, fmt.Errorf("JSON parsing failed: %v", err)
+		log.Printf("Error: JSON parsing failed for liquidity resp %s: %v. Raw Response: %s", mintAddress, err, string(body))
+		return false, fmt.Errorf("JSON parsing failed for %s: %w", mintAddress, err)
 	}
+
 	if len(tokenInfo.Pairs) == 0 {
-		log.Printf("Info: No pairs in DexScreener info for %s.", mintAddress)
+		log.Printf("Info: No pairs found in DexScreener info for %s. Assuming not locked.", mintAddress)
 		return false, nil
 	}
+
 	highestLiquidity := 0.0
-	foundLiquidity := false
+	foundLiquidityData := false
 	for _, pair := range tokenInfo.Pairs {
 		if pair.Liquidity != nil {
-			foundLiquidity = true
+			foundLiquidityData = true
 			if pair.Liquidity.Usd > highestLiquidity {
 				highestLiquidity = pair.Liquidity.Usd
 			}
 		}
 	}
-	if !foundLiquidity {
-		log.Printf("Info: No liquidity data in pairs for %s.", mintAddress)
+
+	if !foundLiquidityData {
+		log.Printf("Info: Pairs found for %s, but none contained liquidity data. Assuming not locked.", mintAddress)
 		return false, nil
 	}
+
 	const liquidityLockThreshold = 1000.0
 	isLocked := highestLiquidity > liquidityLockThreshold
+
+	log.Printf("Info: Liquidity lock status for %s: %t (Highest Liq: $%.2f, Threshold: $%.2f)",
+		mintAddress, isLocked, highestLiquidity, liquidityLockThreshold)
+
 	return isLocked, nil
 }

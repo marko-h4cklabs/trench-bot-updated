@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"ca-scraper/shared/env"
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -9,10 +10,12 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"golang.org/x/time/rate"
 )
 
 var bot *tgbotapi.BotAPI
 var isInitialized bool = false
+var telegramLimiter *rate.Limiter
 
 func InitTelegramBot() error {
 	if isInitialized && bot != nil {
@@ -22,6 +25,7 @@ func InitTelegramBot() error {
 
 	isInitialized = false
 	bot = nil
+	telegramLimiter = nil
 
 	botToken := env.TelegramBotToken
 	groupID := env.TelegramGroupID
@@ -32,7 +36,6 @@ func InitTelegramBot() error {
 	if groupID == 0 {
 		return fmt.Errorf("critical error: TELEGRAM_GROUP_ID missing or invalid in env configuration")
 	}
-
 	log.Println("Initializing Telegram bot API...")
 	var err error
 
@@ -41,7 +44,6 @@ func InitTelegramBot() error {
 		bot = nil
 		return fmt.Errorf("failed to initialize Telegram bot API: %w", err)
 	}
-
 	log.Println("Verifying bot token with Telegram API (GetMe)...")
 	userInfo, err := bot.GetMe()
 	if err != nil {
@@ -49,9 +51,11 @@ func InitTelegramBot() error {
 		return fmt.Errorf("failed to verify bot token with GetMe API call: %w", err)
 	}
 	isInitialized = true
+	telegramLimiter = rate.NewLimiter(rate.Limit(0.2), 1)
 	log.Printf("Telegram bot initialized successfully for @%s", userInfo.UserName)
+	log.Printf("Telegram rate limiter initialized (1 msg / 5 sec)")
 
-	SendSystemLogMessage(fmt.Sprintf("Bot connected successfully (@%s). Ready.", userInfo.UserName))
+	SendSystemLogMessage(fmt.Sprintf(" Bot connected successfully (@%s). Ready.", userInfo.UserName))
 
 	return nil
 }
@@ -94,6 +98,16 @@ func LogTokenPair(pairAddress, url, baseToken, quoteToken string, liquidity, vol
 }
 
 func sendMessageWithRetry(chatID int64, messageThreadID int, text string) {
+	if telegramLimiter == nil {
+		log.Println("WARN: Telegram rate limiter not initialized! Sending without global limit check.")
+	} else {
+		log.Printf("DEBUG: Waiting for Telegram rate limiter token (ChatID: %d)...", chatID)
+		if err := telegramLimiter.Wait(context.Background()); err != nil {
+			log.Printf("ERROR: Telegram rate limiter wait error for chat %d: %v. Proceeding with send attempt...", chatID, err)
+		} else {
+			log.Printf("DEBUG: Telegram rate limiter token acquired (ChatID: %d). Proceeding with send.", chatID)
+		}
+	}
 	if bot == nil {
 		log.Println("ERROR: Cannot send message, Telegram bot is not initialized.")
 		return
@@ -114,7 +128,6 @@ func sendMessageWithRetry(chatID int64, messageThreadID int, text string) {
 
 	maxRetries := 3
 	var lastErr error
-
 	for i := 0; i < maxRetries; i++ {
 		_, err := bot.Send(msg)
 		if err == nil {
@@ -130,18 +143,17 @@ func sendMessageWithRetry(chatID int64, messageThreadID int, text string) {
 			if tgErr.Code == 429 {
 				retryAfter := tgErr.RetryAfter
 				if retryAfter <= 0 {
-					retryAfter = 2
+					retryAfter = 1
 				}
-				log.Printf("INFO: Rate limit hit (429). Retrying after %d seconds... %s", retryAfter, logCtx)
+				log.Printf("INFO: Telegram API rate limit hit (429). Retrying after %d seconds... %s", retryAfter, logCtx)
 				time.Sleep(time.Duration(retryAfter) * time.Second)
 				continue
 			}
 			if tgErr.Code == 400 && strings.Contains(tgErr.Message, "message thread not found") {
 				log.Printf("INFO: Ignoring 'message thread not found' error (MessageThreadID workaround active?). %s", logCtx)
 			}
-
 		} else {
-			log.Printf("ERROR: Failed Telegram send (Attempt %d/%d): %v %s",
+			log.Printf("ERROR: Failed Telegram send (Attempt %d/%d): General Error %v %s",
 				i+1, maxRetries, err, logCtx)
 		}
 
@@ -154,7 +166,6 @@ func sendMessageWithRetry(chatID int64, messageThreadID int, text string) {
 			time.Sleep(waitDuration)
 		}
 	}
-
 	log.Printf("ERROR: Telegram message failed to send after %d retries. Last Error: %v. %s", maxRetries, lastErr, logCtx)
 }
 
