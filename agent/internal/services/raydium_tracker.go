@@ -37,7 +37,7 @@ func TrackGraduatedToken(tokenAddress string) {
 }
 
 func StartDexScreenerValidation() {
-	log.Println("DexScreener Validation Loop Started (using centralized check)...")
+	log.Println("DexScreener Validation Loop Started (using centralized check!)")
 	for {
 		time.Sleep(3 * time.Minute)
 		validateCachedTokens()
