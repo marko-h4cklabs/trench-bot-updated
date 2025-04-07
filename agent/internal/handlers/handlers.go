@@ -7,65 +7,11 @@ import (
 	"ca-scraper/shared/logger"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
-
-func TestWebhookOnStartup() {
-	webhookURL := env.WebhookURL
-	authHeader := env.HeliusAuthHeader
-
-	if webhookURL == "" {
-		log.Println("WARN: WEBHOOK_LISTENER_URL_DEV is not set in env package. Cannot run startup webhook test.")
-		return
-	}
-	if authHeader == "" {
-		log.Println("INFO: HELIUS_AUTH_HEADER is not set in env package for startup test.")
-	}
-	log.Printf("Running startup webhook test towards: %s", webhookURL)
-
-	payloadArray := `[
-		{
-			"description": "Startup Test Event",
-			"timestamp": ` + fmt.Sprintf("%d", time.Now().Unix()) + `,
-			"type": "TRANSFER",
-			"source": "SYSTEM_TEST",
-			"signature": "startup-test-sig-` + fmt.Sprintf("%d", time.Now().UnixNano()) + `",
-			"tokenTransfers": [{"mint": "HqqnXZ8S76rY3GnXgHR9LpbLEKNfxCZASWydNHydtest"}]
-		}
-	]`
-
-	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer([]byte(payloadArray)))
-	if err != nil {
-		log.Printf("ERROR: Failed to create webhook test request: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
-		log.Printf("INFO: Sending startup test with Authorization header.")
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("ERROR: Webhook startup test request failed: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	log.Printf("INFO: Startup Test Webhook Response Status: %s", resp.Status)
-	log.Printf("INFO: Startup Test Webhook Response Body: %s", string(body))
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("WARN: Startup test webhook received non-OK status: %s", resp.Status)
-	}
-}
 
 func RegisterRoutes(router *gin.Engine, log *zap.SugaredLogger, appLogger *logger.Logger) {
 	router.GET("/", func(c *gin.Context) {

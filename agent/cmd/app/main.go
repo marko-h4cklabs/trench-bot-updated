@@ -91,9 +91,6 @@ func main() {
 		appLogger.Info("Webhook existence confirmed.")
 	}
 
-	println("Running Webhook Startup Test...")
-	handlers.TestWebhookOnStartup()
-
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 	router.Use(cors.Default())
@@ -107,7 +104,6 @@ func main() {
 		}
 	}()
 
-	services.TestWebhookWithAuth()
 	tests.RunStartupTests()
 
 	startHeartbeat(appLogger)

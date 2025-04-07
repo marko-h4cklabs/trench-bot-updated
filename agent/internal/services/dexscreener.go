@@ -73,10 +73,9 @@ func IsTokenValid(tokenCA string) (bool, error) {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		return false, fmt.Errorf("DexScreener API request failed for %s: %v", tokenCA, err)
+		return false, fmt.Errorf("DexScreener API request failed for %s: %w", tokenCA, err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode == http.StatusTooManyRequests {
 		log.Printf("Rate limit hit (429) checking %s. Limiter might need adjustment or API has stricter limits.", tokenCA)
 		return false, fmt.Errorf("rate limit exceeded (429)")
@@ -101,21 +100,19 @@ func IsTokenValid(tokenCA string) (bool, error) {
 		return false, fmt.Errorf("error reading API response for %s: %w", tokenCA, err)
 	}
 
-	var responseData struct {
-		Pairs []Pair `json:"pairs"`
-	}
+	var responseData []Pair
 	err = json.Unmarshal(body, &responseData)
 	if err != nil {
 		log.Printf("DexScreener JSON Parsing Failed for %s: %v \nRaw Response: %s", tokenCA, err, string(body))
 		return false, fmt.Errorf("JSON parsing failed for %s: %w", tokenCA, err)
 	}
 
-	if len(responseData.Pairs) == 0 {
+	if len(responseData) == 0 {
 		log.Printf("Token %s found but has no available trading pairs returned by DexScreener. Treating as invalid.", tokenCA)
 		return false, nil
 	}
 
-	pair := responseData.Pairs[0]
+	pair := responseData[0]
 
 	liquidityUSD := 0.0
 	if pair.Liquidity != nil {
@@ -125,6 +122,9 @@ func IsTokenValid(tokenCA string) (bool, error) {
 	}
 
 	marketCap := pair.FDV
+	if pair.MarketCap > 0 {
+		marketCap = pair.MarketCap
+	}
 
 	volume5m, ok5mVol := pair.Volume["m5"]
 	if !ok5mVol {
