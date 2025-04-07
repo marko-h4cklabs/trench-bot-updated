@@ -17,13 +17,13 @@ var dexScreenerLimiter = rate.NewLimiter(rate.Limit(4.66), 5)
 const (
 	dexScreenerAPI = "https://api.dexscreener.com/tokens/v1/solana"
 
-	minLiquidity = 40000.0
-	minMarketCap = 50000.0
-	maxMarketCap = 250000.0
-	min5mVolume  = 1000.0
-	min1hVolume  = 10000.0
-	min5mTx      = 100
-	min1hTx      = 500
+	minLiquidity = 8000.0
+	minMarketCap = 10000.0
+	maxMarketCap = 500000.0
+	min5mVolume  = 200.0
+	min1hVolume  = 2000.0
+	min5mTx      = 10
+	min1hTx      = 50
 )
 
 type Pair struct {
