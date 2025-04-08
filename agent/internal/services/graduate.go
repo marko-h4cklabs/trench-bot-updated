@@ -213,18 +213,18 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
 
 	criteriaDetails := fmt.Sprintf(
-		"Liquidity: `$%.2f` \\(Min: `$%.2f`\\)\n"+
-			"Market Cap: `$%.2f` \\(Range: `$%.2f` \\- `$%.2f`\\)\n"+
-			"Volume \\(5m\\): `$%.2f` \\(Min: `$%.2f`\\)\n"+
-			"Volume \\(1h\\): `$%.2f` \\(Min: `$%.2f`\\)\n"+
-			"TXNs \\(5m\\): `%d` \\(Min: `%d`\\)\n"+
-			"TXNs \\(1h\\): `%d` \\(Min: `%d`\\)",
-		validationResult.LiquidityUSD, minLiquidity,
-		validationResult.MarketCap, minMarketCap, maxMarketCap,
-		validationResult.Volume5m, min5mVolume,
-		validationResult.Volume1h, min1hVolume,
-		validationResult.Txns5m, min5mTx,
-		validationResult.Txns1h, min1hTx,
+		"🩸 Liquidity: `$%f` \n"+
+			"🏛️ Market Cap: `$%f` \n"+
+			"⌛ \\(5m\\) Volume : `$%f` \n"+
+			"⏳ \\(1h\\) Volume : `$%f` \n"+
+			"🔎 \\(5m\\) TXNs : `%d` \n"+
+			"🔍 \\(1h\\) TXNs : `%d`",
+		validationResult.LiquidityUSD,
+		validationResult.MarketCap,
+		validationResult.Volume5m,
+		validationResult.Volume1h,
+		validationResult.Txns5m,
+		validationResult.Txns1h,
 	)
 
 	telegramMessage := fmt.Sprintf(
@@ -232,8 +232,7 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 			"CA: `%s`\n\n"+
 			"DexScreener: %s\n\n"+
 			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
-			"%s\n\n"+
-			"\\-\\-\\- Info \\-\\-\\-\n",
+			"%s\n\n",
 		tokenAddress,
 		dexscreenerURLEsc,
 		criteriaDetails,
