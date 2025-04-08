@@ -211,7 +211,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	log.Info("Token passed validation! Preparing notification...", zap.String("token", tokenAddress))
 
 	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
-	lockStatusStrEsc := notifications.EscapeMarkdownV2(lockStatusStr)
 
 	criteriaDetails := fmt.Sprintf(
 		"Liquidity: `$%.2f` \\(Min: `$%.2f`\\)\n"+
@@ -234,12 +233,10 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 			"DexScreener: %s\n\n"+
 			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
 			"%s\n\n"+
-			"\\-\\-\\- Info \\-\\-\\-\n"+
-			"%s",
+			"\\-\\-\\- Info \\-\\-\\-\n",
 		tokenAddress,
 		dexscreenerURLEsc,
 		criteriaDetails,
-		lockStatusStrEsc,
 	)
 
 	notifications.SendTelegramMessage(telegramMessage)
