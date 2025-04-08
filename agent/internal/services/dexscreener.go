@@ -1,3 +1,4 @@
+// services/dexscreener.go
 package services
 
 import (
@@ -26,6 +27,7 @@ const (
 	min1hTx      = 500
 )
 
+// --- Structs (Pair, Token, Liquidity, TxData) remain the same ---
 type Pair struct {
 	ChainID       string             `json:"chainId"`
 	DexID         string             `json:"dexId"`
@@ -61,9 +63,27 @@ type TxData struct {
 	Sells int `json:"sells"`
 }
 
-func IsTokenValid(tokenCA string) (bool, error) {
+// --- End of existing structs ---
+
+// NEW: Struct to hold validation results and data
+type ValidationResult struct {
+	IsValid      bool
+	PairAddress  string
+	LiquidityUSD float64
+	MarketCap    float64
+	Volume5m     float64
+	Volume1h     float64
+	Txns5m       int
+	Txns1h       int
+	FailReasons  []string // Store reasons for failure if IsValid is false
+}
+
+// MODIFIED: Changed return type from (bool, error) to (*ValidationResult, error)
+func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 	if err := dexScreenerLimiter.Wait(context.Background()); err != nil {
 		log.Printf("ERROR: DexScreener rate limiter wait error for %s: %v", tokenCA, err)
+		// Return nil result and the error
+		return nil, fmt.Errorf("rate limiter error for %s: %w", tokenCA, err)
 	}
 
 	log.Printf("Checking token validity on DexScreener: %s", tokenCA)
@@ -73,15 +93,20 @@ func IsTokenValid(tokenCA string) (bool, error) {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		return false, fmt.Errorf("DexScreener API request failed for %s: %w", tokenCA, err)
+		// Return nil result and the error
+		return nil, fmt.Errorf("DexScreener API request failed for %s: %w", tokenCA, err)
 	}
 	defer resp.Body.Close()
+
+	// --- Handle HTTP status codes (429, 404, other non-200) ---
 	if resp.StatusCode == http.StatusTooManyRequests {
 		log.Printf("Rate limit hit (429) checking %s. Limiter might need adjustment or API has stricter limits.", tokenCA)
-		return false, fmt.Errorf("rate limit exceeded (429)")
+		// Return nil result and a specific error
+		return nil, fmt.Errorf("rate limit exceeded (429)")
 	} else if resp.StatusCode == http.StatusNotFound {
 		log.Printf("Token %s not found on DexScreener (404). Treating as invalid.", tokenCA)
-		return false, nil
+		// Return a result indicating invalid, but no actual error occurred
+		return &ValidationResult{IsValid: false, FailReasons: []string{"Token not found on DexScreener"}}, nil
 	} else if resp.StatusCode != http.StatusOK {
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		errorMsg := fmt.Sprintf("DexScreener API request failed for %s with status: %s", tokenCA, resp.Status)
@@ -91,102 +116,148 @@ func IsTokenValid(tokenCA string) (bool, error) {
 			errorMsg += fmt.Sprintf(". Failed to read response body: %v", readErr)
 		}
 		log.Println(errorMsg)
-		return false, fmt.Errorf("API request failed with status: %s", resp.Status)
+		// Return nil result and the error
+		return nil, fmt.Errorf("API request failed with status: %s", resp.Status)
 	}
 
+	// --- Read and parse response body ---
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Error reading DexScreener API response body for %s: %v", tokenCA, err)
-		return false, fmt.Errorf("error reading API response for %s: %w", tokenCA, err)
+		// Return nil result and the error
+		return nil, fmt.Errorf("error reading API response for %s: %w", tokenCA, err)
 	}
 
 	var responseData []Pair
 	err = json.Unmarshal(body, &responseData)
 	if err != nil {
 		log.Printf("DexScreener JSON Parsing Failed for %s: %v \nRaw Response: %s", tokenCA, err, string(body))
-		return false, fmt.Errorf("JSON parsing failed for %s: %w", tokenCA, err)
+		// Return nil result and the error
+		return nil, fmt.Errorf("JSON parsing failed for %s: %w", tokenCA, err)
 	}
 
 	if len(responseData) == 0 {
 		log.Printf("Token %s found but has no available trading pairs returned by DexScreener. Treating as invalid.", tokenCA)
-		return false, nil
+		// Return a result indicating invalid, but no actual error occurred
+		return &ValidationResult{IsValid: false, FailReasons: []string{"No trading pairs found"}}, nil
 	}
 
+	// --- Extract data from the first pair ---
 	pair := responseData[0]
+	result := &ValidationResult{
+		PairAddress: pair.PairAddress,
+		FailReasons: []string{}, // Initialize empty slice for failure reasons
+	}
 
-	liquidityUSD := 0.0
+	// Liquidity
 	if pair.Liquidity != nil {
-		liquidityUSD = pair.Liquidity.Usd
+		result.LiquidityUSD = pair.Liquidity.Usd
 	} else {
 		log.Printf("Warning: Liquidity data missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
+		result.LiquidityUSD = 0.0
 	}
 
-	marketCap := pair.FDV
+	// Market Cap (using FDV as fallback)
+	result.MarketCap = pair.FDV
 	if pair.MarketCap > 0 {
-		marketCap = pair.MarketCap
+		result.MarketCap = pair.MarketCap
 	}
 
+	// Volume 5m
 	volume5m, ok5mVol := pair.Volume["m5"]
 	if !ok5mVol {
 		log.Printf("Warning: Volume data for 'm5' missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
-		volume5m = 0
+		result.Volume5m = 0
+	} else {
+		result.Volume5m = volume5m
 	}
+
+	// Volume 1h
 	volume1h, ok1hVol := pair.Volume["h1"]
 	if !ok1hVol {
 		log.Printf("Warning: Volume data for 'h1' missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
-		volume1h = 0
+		result.Volume1h = 0
+	} else {
+		result.Volume1h = volume1h
 	}
 
-	txns5m := 0
+	// Transactions 5m
 	if txData5m, ok := pair.Transactions["m5"]; ok {
-		txns5m = txData5m.Buys + txData5m.Sells
+		result.Txns5m = txData5m.Buys + txData5m.Sells
 	} else {
 		log.Printf("Warning: Transaction data for 'm5' missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
+		result.Txns5m = 0
 	}
 
-	txns1h := 0
+	// Transactions 1h
 	if txData1h, ok := pair.Transactions["h1"]; ok {
-		txns1h = txData1h.Buys + txData1h.Sells
+		result.Txns1h = txData1h.Buys + txData1h.Sells
 	} else {
 		log.Printf("Warning: Transaction data for 'h1' missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
+		result.Txns1h = 0
 	}
 
+	// --- Log the extracted data ---
 	log.Printf(" DexScreener Data for %s (Pair: %s) - Liq: %.2f, MC: %.2f, Vol(5m): %.2f, Vol(1h): %.2f, Tx(5m): %d, Tx(1h): %d",
-		tokenCA, pair.PairAddress, liquidityUSD, marketCap, volume5m, volume1h, txns5m, txns1h)
+		tokenCA, result.PairAddress, result.LiquidityUSD, result.MarketCap, result.Volume5m, result.Volume1h, result.Txns5m, result.Txns1h)
 
-	meetsCriteria := liquidityUSD >= minLiquidity &&
-		marketCap >= minMarketCap && marketCap <= maxMarketCap &&
-		volume5m >= min5mVolume &&
-		volume1h >= min1hVolume &&
-		txns5m >= min5mTx &&
-		txns1h >= min1hTx
+	// --- Perform validation checks ---
+	meetsCriteria := true // Assume true initially
+	failReasons := []string{}
+
+	if result.LiquidityUSD < minLiquidity {
+		meetsCriteria = false
+		reason := fmt.Sprintf("Liquidity %.2f < %.2f", result.LiquidityUSD, minLiquidity)
+		failReasons = append(failReasons, reason)
+		log.Printf("   - FAILED: %s", reason)
+	}
+	if result.MarketCap < minMarketCap {
+		meetsCriteria = false
+		reason := fmt.Sprintf("MarketCap %.2f < %.2f", result.MarketCap, minMarketCap)
+		failReasons = append(failReasons, reason)
+		log.Printf("   - FAILED: %s", reason)
+	}
+	if result.MarketCap > maxMarketCap {
+		meetsCriteria = false
+		reason := fmt.Sprintf("MarketCap %.2f > %.2f", result.MarketCap, maxMarketCap)
+		failReasons = append(failReasons, reason)
+		log.Printf("   - FAILED: %s", reason)
+	}
+	if result.Volume5m < min5mVolume {
+		meetsCriteria = false
+		reason := fmt.Sprintf("Vol(5m) %.2f < %.2f", result.Volume5m, min5mVolume)
+		failReasons = append(failReasons, reason)
+		log.Printf("   - FAILED: %s", reason)
+	}
+	if result.Volume1h < min1hVolume {
+		meetsCriteria = false
+		reason := fmt.Sprintf("Vol(1h) %.2f < %.2f", result.Volume1h, min1hVolume)
+		failReasons = append(failReasons, reason)
+		log.Printf("   - FAILED: %s", reason)
+	}
+	if result.Txns5m < min5mTx {
+		meetsCriteria = false
+		reason := fmt.Sprintf("Tx(5m) %d < %d", result.Txns5m, min5mTx)
+		failReasons = append(failReasons, reason)
+		log.Printf("   - FAILED: %s", reason)
+	}
+	if result.Txns1h < min1hTx {
+		meetsCriteria = false
+		reason := fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx)
+		failReasons = append(failReasons, reason)
+		log.Printf("   - FAILED: %s", reason)
+	}
+
+	// --- Set final validation status and return ---
+	result.IsValid = meetsCriteria
+	result.FailReasons = failReasons // Add reasons even if valid (will be empty)
 
 	if meetsCriteria {
 		log.Printf("Token %s meets DexScreener criteria!", tokenCA)
-		return true, nil
 	} else {
 		log.Printf("Token %s did not meet DexScreener criteria.", tokenCA)
-		if liquidityUSD < minLiquidity {
-			log.Printf("   - FAILED: Liquidity %.2f < %.2f", liquidityUSD, minLiquidity)
-		}
-		if marketCap < minMarketCap {
-			log.Printf("   - FAILED: MarketCap %.2f < %.2f", marketCap, minMarketCap)
-		}
-		if marketCap > maxMarketCap {
-			log.Printf("   - FAILED: MarketCap %.2f > %.2f", marketCap, maxMarketCap)
-		}
-		if volume5m < min5mVolume {
-			log.Printf("   - FAILED: Vol(5m) %.2f < %.2f", volume5m, min5mVolume)
-		}
-		if volume1h < min1hVolume {
-			log.Printf("   - FAILED: Vol(1h) %.2f < %.2f", volume1h, min1hVolume)
-		}
-		if txns5m < min5mTx {
-			log.Printf("   - FAILED: Tx(5m) %d < %d", txns5m, min5mTx)
-		}
-		if txns1h < min1hTx {
-			log.Printf("   - FAILED: Tx(1h) %d < %d", txns1h, min1hTx)
-		}
-		return false, nil
 	}
+
+	// Return the populated result struct and no error
+	return result, nil
 }

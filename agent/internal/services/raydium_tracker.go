@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-
 	"strings"
 	"sync"
 	"time"
@@ -62,19 +61,25 @@ func validateCachedTokens() {
 		if totalVolume >= 1000 {
 			log.Printf("Checking DexScreener eligibility for token %s (Volume: %.2f)", token, totalVolume)
 
-			isValid, err := IsTokenValid(token)
+			validationResult, err := IsTokenValid(token)
 			if err != nil {
 				log.Printf(" DexScreener check failed for %s: %v", token, err)
 				failedCount++
 				continue
 			}
 
-			if isValid {
+			if validationResult != nil && validationResult.IsValid {
 				validatedCount++
 				log.Printf("Token %s meets DexScreener criteria via periodic check!", token)
+
 			} else {
 				failedCount++
-				log.Printf("Token %s failed DexScreener validation via periodic check.", token)
+
+				reason := "Did not meet criteria or validation failed"
+				if validationResult != nil && len(validationResult.FailReasons) > 0 {
+					reason = strings.Join(validationResult.FailReasons, "; ")
+				}
+				log.Printf("Token %s failed DexScreener validation via periodic check. Reason: %s", token, reason)
 			}
 		}
 	}
@@ -259,13 +264,19 @@ func HandleTransactionWebhook(c *gin.Context) {
 
 		log.Printf("Performing immediate DexScreener check for token %s from webhook tx %s", tokenMint, txSignature)
 
-		isValid, err := IsTokenValid(tokenMint)
+		validationResult, err := IsTokenValid(tokenMint)
 		if err != nil {
 			log.Printf("Error checking token %s (from tx %s) with DexScreener: %v", tokenMint, txSignature, err)
 			continue
 		}
-		if !isValid {
-			log.Printf("Token %s (from tx %s) does not meet immediate criteria.", tokenMint, txSignature)
+
+		if validationResult == nil || !validationResult.IsValid {
+
+			reason := "Did not meet criteria or validation failed"
+			if validationResult != nil && len(validationResult.FailReasons) > 0 {
+				reason = strings.Join(validationResult.FailReasons, "; ")
+			}
+			log.Printf("Token %s (from tx %s) does not meet immediate criteria. Reason: %s", tokenMint, txSignature, reason)
 			continue
 		}
 
@@ -273,14 +284,13 @@ func HandleTransactionWebhook(c *gin.Context) {
 		validatedCount++
 
 		dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenMint)
-
 		dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
 
 		telegramMessage := fmt.Sprintf(
 			"Hot Swap Validated\\! \nToken: `%s`\nDexScreener: %s\nTx: `%s`",
 			tokenMint,
 			dexscreenerLinkEsc,
-			txSignature,
+			notifications.EscapeMarkdownV2(txSignature), // Escape Tx Signature
 		)
 		notifications.SendTelegramMessage(telegramMessage)
 
@@ -423,7 +433,7 @@ func TestWebhookWithAuth() {
 				map[string]interface{}{
 					"fromUserAccount": "SourceWallet",
 					"toUserAccount":   "DestinationWalletATA",
-					"mint":            "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump",
+					"mint":            "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump", // Example mint
 					"tokenAmount":     1500000000.0,
 				},
 			},
@@ -445,7 +455,7 @@ func TestWebhookWithAuth() {
 					"tokenOutputs": []interface{}{
 						map[string]interface{}{
 							"account":     "DestinationWalletATA",
-							"mint":        "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump",
+							"mint":        "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump", // Example mint
 							"tokenAmount": 1500000000.0,
 						},
 					},
@@ -517,14 +527,16 @@ func ValidateCachedSwaps() {
 		for _, token := range tokensToValidate {
 
 			log.Printf("Checking cached token %s (Vol: $%.2f) via ValidateCachedSwaps loop.", token, volumeMap[token])
-			isValid, err := IsTokenValid(token)
+
+			validationResult, err := IsTokenValid(token)
 			if err != nil {
 				log.Printf(" Error checking token %s during ValidateCachedSwaps: %v", token, err)
 				failedCount++
+
 				continue
 			}
 
-			if isValid {
+			if validationResult != nil && validationResult.IsValid {
 				validatedCount++
 				log.Printf("Token %s (Vol: $%.2f) validated via ValidateCachedSwaps loop.", token, volumeMap[token])
 
@@ -537,13 +549,19 @@ func ValidateCachedSwaps() {
 					dexscreenerLinkEsc,
 				)
 				notifications.SendTelegramMessage(telegramMessage)
+
 				swapCache.Lock()
 				delete(swapCache.Data, token)
 				swapCache.Unlock()
 				log.Printf("   Removed validated token %s from cache.", token)
 			} else {
 				failedCount++
-				log.Printf("Token %s (Vol: $%.2f) failed validation via ValidateCachedSwaps loop.", token, volumeMap[token])
+
+				reason := "Did not meet criteria or validation failed"
+				if validationResult != nil && len(validationResult.FailReasons) > 0 {
+					reason = strings.Join(validationResult.FailReasons, "; ")
+				}
+				log.Printf("Token %s (Vol: $%.2f) failed validation via ValidateCachedSwaps loop. Reason: %s", token, volumeMap[token], reason)
 
 				swapCache.Lock()
 				delete(swapCache.Data, token)
