@@ -455,7 +455,7 @@ func TestWebhookWithAuth() {
 					"tokenOutputs": []interface{}{
 						map[string]interface{}{
 							"account":     "DestinationWalletATA",
-							"mint":        "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump", // Example mint
+							"mint":        "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump",
 							"tokenAmount": 1500000000.0,
 						},
 					},

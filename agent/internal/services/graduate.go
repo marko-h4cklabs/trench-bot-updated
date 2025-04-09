@@ -50,7 +50,6 @@ func SetupGraduationWebhook(webhookURL string, log *logger.Logger) error {
 	}
 	if pumpFunAuthority == "" {
 		log.Warn("PUMPFUN_AUTHORITY_ADDRESS missing!")
-
 	}
 	if webhookSecret == "" {
 		log.Warn("WEBHOOK_SECRET missing!")
@@ -63,7 +62,6 @@ func SetupGraduationWebhook(webhookURL string, log *logger.Logger) error {
 	existingWebhook, err := CheckExistingHeliusWebhook(webhookURL)
 	if err != nil {
 		log.Error("Failed check for existing webhook, attempting creation regardless.", zap.Error(err))
-
 	}
 	if existingWebhook {
 		log.Info("Graduation webhook already exists.", zap.String("url", webhookURL))
@@ -111,19 +109,16 @@ func SetupGraduationWebhook(webhookURL string, log *logger.Logger) error {
 
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-
 		log.Warn("Failed to read webhook creation response body", zap.Error(readErr))
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		log.Info("Webhook created successfully", zap.String("url", webhookURL), zap.Int("status", resp.StatusCode))
-
 		return nil
 	} else {
 		log.Error("Failed to create graduation webhook.",
 			zap.Int("status", resp.StatusCode),
 			zap.String("response", string(body)))
-
 		return fmt.Errorf("failed to create graduation webhook: status %d, response body: %s", resp.StatusCode, string(body))
 	}
 }
@@ -136,7 +131,6 @@ func HandleWebhook(payload []byte, log *logger.Logger) {
 	}
 
 	var eventsArray []map[string]interface{}
-
 	if err := json.Unmarshal(payload, &eventsArray); err == nil {
 		log.Debug("Webhook payload is an array.", zap.Int("count", len(eventsArray)))
 		for i, event := range eventsArray {
@@ -148,7 +142,6 @@ func HandleWebhook(payload []byte, log *logger.Logger) {
 
 	var event map[string]interface{}
 	if err := json.Unmarshal(payload, &event); err != nil {
-
 		log.Error("Failed to parse webhook payload (neither array nor object)", zap.Error(err), zap.String("payload", string(payload)))
 		return
 	}
@@ -161,7 +154,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 
 	tokenAddress, ok := extractGraduatedToken(event)
 	if !ok {
-
 		return
 	}
 
@@ -192,7 +184,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 
 	if validationErr != nil {
 		log.Error("Error checking DexScreener criteria", zap.String("token", tokenAddress), zap.Error(validationErr))
-
 		return
 	}
 
@@ -204,7 +195,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 			reason = "Did not meet criteria (no specific reasons returned)"
 		}
 		log.Info("Token failed DexScreener criteria", zap.String("token", tokenAddress), zap.String("reason", reason))
-
 		return
 	}
 
@@ -227,15 +217,39 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 		validationResult.Txns1h,
 	)
 
+	var socialLinksBuilder strings.Builder
+	hasSocials := false
+
+	if validationResult.WebsiteURL != "" {
+		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", notifications.EscapeMarkdownV2(validationResult.WebsiteURL)))
+		hasSocials = true
+	}
+	if validationResult.TwitterURL != "" {
+		socialLinksBuilder.WriteString(fmt.Sprintf("🐦 Twitter: %s\n", notifications.EscapeMarkdownV2(validationResult.TwitterURL)))
+		hasSocials = true
+	}
+	if validationResult.TelegramURL != "" {
+		socialLinksBuilder.WriteString(fmt.Sprintf("✈️ Telegram: %s\n", notifications.EscapeMarkdownV2(validationResult.TelegramURL)))
+		hasSocials = true
+	}
+
+	socialsSection := ""
+	if hasSocials {
+		socialsSection = "\\-\\-\\- Socials \\-\\-\\-\n" + socialLinksBuilder.String() + "\n"
+	}
+
 	telegramMessage := fmt.Sprintf(
 		"*Token Graduated & Validated\\!* \n\n"+
 			"CA: `%s`\n\n"+
 			"DexScreener: %s\n\n"+
 			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
-			"%s\n\n",
+			"%s\n\n"+
+			"%s"+
+			"\\-\\-\\- Info \\-\\-\\-\n",
 		tokenAddress,
 		dexscreenerURLEsc,
 		criteriaDetails,
+		socialsSection,
 	)
 
 	notifications.SendTelegramMessage(telegramMessage)
@@ -246,21 +260,16 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	graduatedTokenCache.Unlock()
 	log.Info("Added token to graduatedTokenCache", zap.String("token", tokenAddress))
 	TrackGraduatedToken(tokenAddress)
-
 }
 
 func extractGraduatedToken(event map[string]interface{}) (string, bool) {
-
 	if transfers, hasTransfers := event["tokenTransfers"].([]interface{}); hasTransfers {
 		for _, transfer := range transfers {
 			if transferMap, ok := transfer.(map[string]interface{}); ok {
-
 				mint, mintOk := transferMap["mint"].(string)
 				amountStr, amountOk := transferMap["tokenAmount"].(float64)
 				userAccount, _ := transferMap["toUserAccount"].(string)
-
 				if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" && amountOk && amountStr > 0 {
-
 					log.Printf("Extracted Token Address '%s' from tokenTransfers (Amount: %f, To: %s)", mint, amountStr, userAccount)
 					return mint, true
 				}
@@ -270,7 +279,6 @@ func extractGraduatedToken(event map[string]interface{}) (string, bool) {
 
 	if events, hasEvents := event["events"].(map[string]interface{}); hasEvents {
 		if swapEvent, hasSwap := events["swap"].(map[string]interface{}); hasSwap {
-
 			if tokenOutputs, has := swapEvent["tokenOutputs"].([]interface{}); has {
 				for _, output := range tokenOutputs {
 					if outputMap, ok := output.(map[string]interface{}); ok {
@@ -283,7 +291,6 @@ func extractGraduatedToken(event map[string]interface{}) (string, bool) {
 					}
 				}
 			}
-
 			if tokenInputs, has := swapEvent["tokenInputs"].([]interface{}); has {
 				for _, input := range tokenInputs {
 					if inputMap, ok := input.(map[string]interface{}); ok {
@@ -337,9 +344,7 @@ func ValidateCachedTokens() {
 		failedCount := 0
 
 		for _, token := range tokensToValidate {
-
 			validationResult, err := IsTokenValid(token)
-
 			if err != nil {
 				log.Printf("[WARN] Error validating %s during periodic check: %v", token, err)
 				failedCount++
@@ -349,7 +354,6 @@ func ValidateCachedTokens() {
 			if validationResult != nil && validationResult.IsValid {
 				validatedCount++
 				log.Printf("[INFO] Token %s remains valid during periodic check.", token)
-
 			} else {
 				failedCount++
 				reason := "Unknown reason"
@@ -358,9 +362,7 @@ func ValidateCachedTokens() {
 				} else if validationResult != nil && !validationResult.IsValid {
 					reason = "Did not meet criteria"
 				}
-
 				log.Printf("[INFO] Token %s no longer valid during periodic check. Reason: %s", token, reason)
-
 			}
 		}
 		log.Printf("Periodic validation check complete. Valid now: %d, Invalid/Error: %d", validatedCount, failedCount)
@@ -369,13 +371,10 @@ func ValidateCachedTokens() {
 
 func init() {
 	log.Println("Initializing Graduation Service background tasks...")
-
 }
 
 func CheckLiquidityLock(mintAddress string) (bool, error) {
-
 	if err := dexScreenerLimiter.Wait(context.Background()); err != nil {
-
 		log.Printf("ERROR: DexScreener rate limiter wait error during *liquidity check* for %s: %v", mintAddress, err)
 		return false, fmt.Errorf("rate limiter error during liquidity check for %s: %w", mintAddress, err)
 	}
@@ -394,7 +393,6 @@ func CheckLiquidityLock(mintAddress string) (bool, error) {
 		log.Printf("Rate limit hit (429) during liquidity check for %s.", mintAddress)
 		return false, fmt.Errorf("rate limit exceeded (429)")
 	} else if resp.StatusCode == http.StatusNotFound {
-
 		log.Printf("Info: Liquidity info N/A via DexScreener token endpoint for %s (404). Assuming not locked.", mintAddress)
 		return false, nil
 	} else if resp.StatusCode != http.StatusOK {
@@ -424,7 +422,6 @@ func CheckLiquidityLock(mintAddress string) (bool, error) {
 
 	err = json.Unmarshal(body, &tokenInfo)
 	if err != nil {
-
 		log.Printf("Error: JSON parsing failed for liquidity response %s: %v. Raw Response: %s", mintAddress, err, string(body))
 		return false, fmt.Errorf("JSON parsing failed for %s: %w", mintAddress, err)
 	}
@@ -442,8 +439,6 @@ func CheckLiquidityLock(mintAddress string) (bool, error) {
 			if pair.Liquidity.Usd > highestLiquidity {
 				highestLiquidity = pair.Liquidity.Usd
 			}
-		} else {
-
 		}
 	}
 
