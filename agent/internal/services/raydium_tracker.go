@@ -58,7 +58,7 @@ func validateCachedTokens() {
 
 	for token, volumes := range tokensToCheck {
 		totalVolume := sum(volumes)
-		if totalVolume >= 1000 {
+		if totalVolume >= 500 {
 			log.Printf("Checking DexScreener eligibility for token %s (Volume: %.2f)", token, totalVolume)
 
 			validationResult, err := IsTokenValid(token)
@@ -502,7 +502,7 @@ func TestWebhookWithAuth() {
 func ValidateCachedSwaps() {
 	log.Println("ValidateCachedSwaps Loop Started...")
 	for {
-		time.Sleep(4 * time.Minute)
+		time.Sleep(3 * time.Minute)
 
 		log.Println("Running ValidateCachedSwaps check...")
 

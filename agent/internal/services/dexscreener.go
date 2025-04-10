@@ -82,20 +82,21 @@ type TxData struct {
 }
 
 type ValidationResult struct {
-	IsValid      bool
-	PairAddress  string
-	LiquidityUSD float64
-	MarketCap    float64
-	Volume5m     float64
-	Volume1h     float64
-	Txns5m       int
-	Txns1h       int
-	FailReasons  []string
-	WebsiteURL   string
-	TwitterURL   string
-	TelegramURL  string
-	OtherSocials map[string]string
-	ImageURL     string
+	IsValid                bool
+	PairAddress            string
+	LiquidityUSD           float64
+	MarketCap              float64
+	Volume5m               float64
+	Volume1h               float64
+	Txns5m                 int
+	Txns1h                 int
+	FailReasons            []string
+	WebsiteURL             string
+	TwitterURL             string
+	TelegramURL            string
+	OtherSocials           map[string]string
+	ImageURL               string
+	PairCreatedAtTimestamp int64
 }
 
 func IsTokenValid(tokenCA string) (*ValidationResult, error) {
@@ -107,7 +108,7 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 	log.Printf("Checking token validity on DexScreener: %s", tokenCA)
 
 	url := fmt.Sprintf("%s/%s", dexScreenerAPI, tokenCA)
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	resp, err := client.Get(url)
 	if err != nil {

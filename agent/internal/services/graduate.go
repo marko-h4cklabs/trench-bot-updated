@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -201,20 +202,30 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	log.Info("Token passed validation! Preparing notification...", zap.String("token", tokenAddress))
 
 	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
-
+	var ageStr string
+	if validationResult.PairCreatedAtTimestamp > 0 {
+		creationTime := time.Unix(validationResult.PairCreatedAtTimestamp/1000, 0)
+		ageDuration := time.Since(creationTime)
+		ageStr = formatDurationSimple(ageDuration)
+	} else {
+		ageStr = "Unknown"
+	}
+	ageStrEsc := notifications.EscapeMarkdownV2(ageStr)
 	criteriaDetails := fmt.Sprintf(
 		"🩸 Liquidity: `$%.0f` \n"+
 			"🏛️ Market Cap: `$%.0f` \n"+
 			"⌛ \\(5m\\) Volume : `$%.0f` \n"+
 			"⏳ \\(1h\\) Volume : `$%.0f` \n"+
 			"🔎 \\(5m\\) TXNs : `%d` \n"+
-			"🔍 \\(1h\\) TXNs : `%d`",
+			"🔍 \\(1h\\) TXNs : `%d`"+
+			"⏰ Age: %s\n",
 		validationResult.LiquidityUSD,
 		validationResult.MarketCap,
 		validationResult.Volume5m,
 		validationResult.Volume1h,
 		validationResult.Txns5m,
 		validationResult.Txns1h,
+		ageStrEsc,
 	)
 
 	var socialLinksBuilder strings.Builder
@@ -317,8 +328,8 @@ func extractGraduatedToken(event map[string]interface{}) (string, bool) {
 }
 
 func ValidateCachedTokens() {
-	validationInterval := 5 * time.Minute
-	cacheExpiry := 30 * time.Minute
+	validationInterval := 3 * time.Minute
+	cacheExpiry := 20 * time.Minute
 
 	log.Printf("Periodic graduated token validation routine started (Interval: %v, Expiry: %v)", validationInterval, cacheExpiry)
 	ticker := time.NewTicker(validationInterval)
@@ -386,7 +397,7 @@ func CheckLiquidityLock(mintAddress string) (bool, error) {
 	}
 
 	url := fmt.Sprintf("https://api.dexscreener.com/v1/solana/tokens/%s", mintAddress)
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 7 * time.Second}
 
 	resp, err := client.Get(url)
 	if err != nil {
@@ -460,4 +471,21 @@ func CheckLiquidityLock(mintAddress string) (bool, error) {
 		mintAddress, isLocked, highestLiquidity, liquidityLockThreshold)
 
 	return isLocked, nil
+}
+
+func formatDurationSimple(d time.Duration) string {
+	if d < time.Minute {
+		seconds := int(math.Round(d.Seconds()))
+		return fmt.Sprintf("%ds", seconds)
+	}
+	if d < time.Hour {
+		minutes := int(math.Round(d.Minutes()))
+		return fmt.Sprintf("%dm", minutes)
+	}
+	if d < 24*time.Hour {
+		hours := int(math.Round(d.Hours()))
+		return fmt.Sprintf("%dh", hours)
+	}
+	days := int(math.Round(d.Hours() / 24))
+	return fmt.Sprintf("%dd", days)
 }
