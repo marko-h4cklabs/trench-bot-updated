@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -192,17 +191,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 
 	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
 
-	var ageStr string
-	if validationResult.PairCreatedAtTimestamp > 0 {
-		creationTime := time.Unix(validationResult.PairCreatedAtTimestamp/1000, 0)
-		ageDuration := time.Since(creationTime)
-		ageStr = formatDurationSimple(ageDuration)
-	} else {
-		ageStr = "Unknown"
-		log.Warn("PairCreatedAtTimestamp missing or zero, cannot calculate age", zap.String("token", tokenAddress))
-	}
-	ageStrEsc := notifications.EscapeMarkdownV2(ageStr)
-
 	criteriaDetails := fmt.Sprintf(
 		"🩸 Liquidity: `$%.0f` \n"+
 			"🏛️ Market Cap: `$%.0f` \n"+
@@ -241,13 +229,11 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 
 	caption := fmt.Sprintf(
 		"*Token Graduated & Validated\\!* \n\n"+
-			"⏰ Age: %s\n"+
 			"CA: `%s`\n\n"+
 			"DexScreener: %s\n\n"+
 			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
 			"%s\n\n"+
 			"%s",
-		ageStrEsc,
 		tokenAddress,
 		dexscreenerURLEsc,
 		criteriaDetails,
@@ -266,6 +252,8 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	}
 
 	time.Sleep(1 * time.Second)
+	notifications.SendTelegramMessage(tokenAddress)
+	log.Info("Follow-up CA message initiated.", zap.String("token", tokenAddress))
 
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
@@ -288,7 +276,6 @@ func extractGraduatedToken(event map[string]interface{}) (string, bool) {
 			}
 		}
 	}
-
 	if events, hasEvents := event["events"].(map[string]interface{}); hasEvents {
 		if swapEvent, hasSwap := events["swap"].(map[string]interface{}); hasSwap {
 			if tokenOutputs, has := swapEvent["tokenOutputs"].([]interface{}); has {
@@ -317,31 +304,10 @@ func extractGraduatedToken(event map[string]interface{}) (string, bool) {
 			}
 		}
 	}
-
 	log.Println("Could not extract target token address from graduation event.")
 	return "", false
 }
 
 func init() {
 	log.Println("Initializing Graduation Service background tasks...")
-}
-
-func formatDurationSimple(d time.Duration) string {
-	if d < time.Minute {
-		seconds := int(math.Round(d.Seconds()))
-		if seconds == 0 && d > 0 {
-			seconds = 1
-		}
-		return fmt.Sprintf("%ds", seconds)
-	}
-	if d < time.Hour {
-		minutes := int(math.Round(d.Minutes()))
-		return fmt.Sprintf("%dm", minutes)
-	}
-	if d < 24*time.Hour {
-		hours := int(math.Round(d.Hours()))
-		return fmt.Sprintf("%dh", hours)
-	}
-	days := int(math.Round(d.Hours() / 24))
-	return fmt.Sprintf("%dd", days)
 }

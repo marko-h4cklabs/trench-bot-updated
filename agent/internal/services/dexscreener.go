@@ -157,9 +157,10 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 
 	pair := responseData[0]
 	result := &ValidationResult{
-		PairAddress:  pair.PairAddress,
-		FailReasons:  []string{},
-		OtherSocials: make(map[string]string),
+		PairAddress:            pair.PairAddress,
+		PairCreatedAtTimestamp: pair.PairCreatedAt,
+		FailReasons:            []string{},
+		OtherSocials:           make(map[string]string),
 	}
 
 	if pair.Liquidity != nil {
@@ -221,8 +222,8 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 		}
 	}
 
-	log.Printf("INFO: DexScreener Data fetched for %s (Pair: %s) - Liq: %.2f, MC: %.2f, Vol(5m): %.2f, Vol(1h): %.2f, Tx(5m): %d, Tx(1h): %d, Website: %s, Twitter: %s, Telegram: %s, Image: %s",
-		tokenCA, result.PairAddress, result.LiquidityUSD, result.MarketCap, result.Volume5m, result.Volume1h, result.Txns5m, result.Txns1h, result.WebsiteURL, result.TwitterURL, result.TelegramURL, result.ImageURL)
+	log.Printf("INFO: DexScreener Data fetched for %s (Pair: %s) - Liq: %.2f, MC: %.2f, Vol(5m): %.2f, Vol(1h): %.2f, Tx(5m): %d, Tx(1h): %d, Website: %s, Twitter: %s, Telegram: %s, Image: %s, CreatedAt: %d",
+		tokenCA, result.PairAddress, result.LiquidityUSD, result.MarketCap, result.Volume5m, result.Volume1h, result.Txns5m, result.Txns1h, result.WebsiteURL, result.TwitterURL, result.TelegramURL, result.ImageURL, result.PairCreatedAtTimestamp)
 
 	meetsCriteria := true
 	failReasons := []string{}
