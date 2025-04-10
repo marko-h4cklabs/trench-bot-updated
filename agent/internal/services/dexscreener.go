@@ -19,12 +19,12 @@ const (
 	dexScreenerAPI = "https://api.dexscreener.com/tokens/v1/solana"
 
 	minLiquidity = 40000.0
-	minMarketCap = 25000.0
-	maxMarketCap = 250000.0
+	minMarketCap = 20000.0
+	maxMarketCap = 300000.0
 	min5mVolume  = 1000.0
 	min1hVolume  = 10000.0
-	min5mTx      = 100
-	min1hTx      = 400
+	min5mTx      = 80
+	min1hTx      = 350
 )
 
 type Pair struct {
