@@ -203,10 +203,10 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
 
 	criteriaDetails := fmt.Sprintf(
-		"🩸 Liquidity: `$%f` \n"+
-			"🏛️ Market Cap: `$%f` \n"+
-			"⌛ \\(5m\\) Volume : `$%f` \n"+
-			"⏳ \\(1h\\) Volume : `$%f` \n"+
+		"🩸 Liquidity: `$%.0f` \n"+
+			"🏛️ Market Cap: `$%.0f` \n"+
+			"⌛ \\(5m\\) Volume : `$%.0f` \n"+
+			"⏳ \\(1h\\) Volume : `$%.0f` \n"+
 			"🔎 \\(5m\\) TXNs : `%d` \n"+
 			"🔍 \\(1h\\) TXNs : `%d`",
 		validationResult.LiquidityUSD,
@@ -238,7 +238,7 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 		socialsSection = "\\-\\-\\- Socials \\-\\-\\-\n" + socialLinksBuilder.String() + "\n"
 	}
 
-	telegramMessage := fmt.Sprintf(
+	caption := fmt.Sprintf(
 		"*Token Graduated & Validated\\!* \n\n"+
 			"CA: `%s`\n\n"+
 			"DexScreener: %s\n\n"+
@@ -252,9 +252,17 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 		socialsSection,
 	)
 
-	notifications.SendTelegramMessage(telegramMessage)
-	log.Info("Telegram notification initiated", zap.String("token", tokenAddress))
+	if validationResult.ImageURL != "" {
+		notifications.SendPhotoMessage(validationResult.ImageURL, caption)
+		log.Info("Telegram photo notification initiated", zap.String("token", tokenAddress))
+	} else {
+		notifications.SendTelegramMessage(caption)
+		log.Warn("Token image URL not found, sending text notification", zap.String("token", tokenAddress))
+		log.Info("Telegram text notification initiated", zap.String("token", tokenAddress))
+	}
 
+	time.Sleep(1 * time.Second)
+	notifications.SendTelegramMessage(tokenAddress)
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()

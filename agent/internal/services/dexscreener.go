@@ -24,8 +24,8 @@ const (
 	min5mVolume  = 1000.0
 	min1hVolume  = 10000.0
 	min5mTx      = 100
-	max5mTx      = 750
-	min1hTx      = 400
+	max5mTx      = 750 // Use the value from the user's last provided file
+	min1hTx      = 400 // Use the value from the user's last provided file
 	max1hTx      = 1100
 )
 
@@ -97,6 +97,7 @@ type ValidationResult struct {
 	TwitterURL   string
 	TelegramURL  string
 	OtherSocials map[string]string
+	ImageURL     string // Added ImageURL
 }
 
 func IsTokenValid(tokenCA string) (*ValidationResult, error) {
@@ -202,6 +203,7 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 	}
 
 	if pair.Info != nil {
+		result.ImageURL = pair.Info.ImageURL // Extract Image URL
 		if len(pair.Info.Websites) > 0 {
 			result.WebsiteURL = pair.Info.Websites[0].URL
 		}
@@ -217,8 +219,8 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 		}
 	}
 
-	log.Printf(" DexScreener Data for %s (Pair: %s) - Liq: %.2f, MC: %.2f, Vol(5m): %.2f, Vol(1h): %.2f, Tx(5m): %d, Tx(1h): %d, Website: %s, Twitter: %s, Telegram: %s",
-		tokenCA, result.PairAddress, result.LiquidityUSD, result.MarketCap, result.Volume5m, result.Volume1h, result.Txns5m, result.Txns1h, result.WebsiteURL, result.TwitterURL, result.TelegramURL)
+	log.Printf(" DexScreener Data for %s (Pair: %s) - Liq: %.2f, MC: %.2f, Vol(5m): %.2f, Vol(1h): %.2f, Tx(5m): %d, Tx(1h): %d, Website: %s, Twitter: %s, Telegram: %s, Image: %s",
+		tokenCA, result.PairAddress, result.LiquidityUSD, result.MarketCap, result.Volume5m, result.Volume1h, result.Txns5m, result.Txns1h, result.WebsiteURL, result.TwitterURL, result.TelegramURL, result.ImageURL) // Added ImageURL to log
 
 	meetsCriteria := true
 	failReasons := []string{}
