@@ -261,7 +261,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	}
 
 	time.Sleep(1 * time.Second)
-	notifications.SendTelegramMessage(tokenAddress)
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()

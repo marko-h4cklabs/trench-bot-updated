@@ -502,14 +502,14 @@ func TestWebhookWithAuth() {
 func ValidateCachedSwaps() {
 	log.Println("ValidateCachedSwaps Loop Started...")
 	for {
-		time.Sleep(5 * time.Minute)
+		time.Sleep(4 * time.Minute)
 
 		log.Println("Running ValidateCachedSwaps check...")
 
 		swapCache.RLock()
 		tokensToValidate := make([]string, 0, len(swapCache.Data))
 		volumeMap := make(map[string]float64, len(swapCache.Data))
-		const validationVolumeThreshold = 1000
+		const validationVolumeThreshold = 500
 		for token, volumes := range swapCache.Data {
 			totalVolume := sum(volumes)
 			if totalVolume >= validationVolumeThreshold {
