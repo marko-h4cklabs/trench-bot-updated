@@ -87,7 +87,7 @@ func LogToTelegram(message string) {
 
 func LogTokenPair(pairAddress, url, baseToken, quoteToken string, liquidity, volume float64, buys, sells int, tokenAge string) {
 	message := fmt.Sprintf(
-		` *Token Pair Found\!* 
+		` *Token Pair Found\!*
  *Token Address:* [%s](%s)
  *Pair:* %s / %s
  *Liquidity:* \$%.2f

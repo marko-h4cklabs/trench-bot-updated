@@ -244,8 +244,7 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 			"DexScreener: %s\n\n"+
 			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
 			"%s\n\n"+
-			"%s"+
-			"\\-\\-\\- Info \\-\\-\\-\n",
+			"%s",
 		tokenAddress,
 		dexscreenerURLEsc,
 		criteriaDetails,
