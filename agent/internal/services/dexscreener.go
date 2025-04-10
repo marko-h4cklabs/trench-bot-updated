@@ -24,9 +24,7 @@ const (
 	min5mVolume  = 1000.0
 	min1hVolume  = 10000.0
 	min5mTx      = 100
-	max5mTx      = 750
 	min1hTx      = 400
-	max1hTx      = 1100
 )
 
 type Pair struct {
@@ -113,43 +111,46 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 
 	resp, err := client.Get(url)
 	if err != nil {
+		log.Printf("ERROR: DexScreener API GET request failed for %s: %v", tokenCA, err)
 		return nil, fmt.Errorf("DexScreener API request failed for %s: %w", tokenCA, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		log.Printf("Rate limit hit (429) checking %s. Limiter might need adjustment or API has stricter limits.", tokenCA)
+		log.Printf("WARN: Rate limit hit checking DexScreener for %s (Status: %d)", tokenCA, resp.StatusCode)
 		return nil, fmt.Errorf("rate limit exceeded (429)")
 	} else if resp.StatusCode == http.StatusNotFound {
-		log.Printf("Token %s not found on DexScreener (404). Treating as invalid.", tokenCA)
+		log.Printf("INFO: Token %s not found on DexScreener (Status: %d)", tokenCA, resp.StatusCode)
 		return &ValidationResult{IsValid: false, FailReasons: []string{"Token not found on DexScreener"}}, nil
 	} else if resp.StatusCode != http.StatusOK {
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		errorMsg := fmt.Sprintf("DexScreener API request failed for %s with status: %s", tokenCA, resp.Status)
+		bodyStr := ""
 		if readErr == nil && len(bodyBytes) > 0 {
-			errorMsg += fmt.Sprintf(". Body: %s", string(bodyBytes))
+			bodyStr = string(bodyBytes)
+			errorMsg += fmt.Sprintf(". Body: %s", bodyStr)
 		} else if readErr != nil {
 			errorMsg += fmt.Sprintf(". Failed to read response body: %v", readErr)
 		}
-		log.Println(errorMsg)
+		log.Printf("ERROR: DexScreener API non-OK status for %s: %s", tokenCA, errorMsg)
 		return nil, fmt.Errorf("API request failed with status: %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Error reading DexScreener API response body for %s: %v", tokenCA, err)
+		log.Printf("ERROR: Error reading DexScreener API response body for %s: %v", tokenCA, err)
 		return nil, fmt.Errorf("error reading API response for %s: %w", tokenCA, err)
 	}
 
 	var responseData []Pair
 	err = json.Unmarshal(body, &responseData)
 	if err != nil {
-		log.Printf("DexScreener JSON Parsing Failed for %s: %v \nRaw Response: %s", tokenCA, err, string(body))
+		log.Printf("ERROR: DexScreener JSON Parsing Failed for %s: %v \nRaw Response: %s", tokenCA, err, string(body))
 		return nil, fmt.Errorf("JSON parsing failed for %s: %w", tokenCA, err)
 	}
 
 	if len(responseData) == 0 {
-		log.Printf("Token %s found but has no available trading pairs returned by DexScreener. Treating as invalid.", tokenCA)
+		log.Printf("INFO: Token %s found but has no trading pairs on DexScreener.", tokenCA)
 		return &ValidationResult{IsValid: false, FailReasons: []string{"No trading pairs found"}}, nil
 	}
 
@@ -219,7 +220,7 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 		}
 	}
 
-	log.Printf(" DexScreener Data for %s (Pair: %s) - Liq: %.2f, MC: %.2f, Vol(5m): %.2f, Vol(1h): %.2f, Tx(5m): %d, Tx(1h): %d, Website: %s, Twitter: %s, Telegram: %s, Image: %s",
+	log.Printf("INFO: DexScreener Data fetched for %s (Pair: %s) - Liq: %.2f, MC: %.2f, Vol(5m): %.2f, Vol(1h): %.2f, Tx(5m): %d, Tx(1h): %d, Website: %s, Twitter: %s, Telegram: %s, Image: %s",
 		tokenCA, result.PairAddress, result.LiquidityUSD, result.MarketCap, result.Volume5m, result.Volume1h, result.Txns5m, result.Txns1h, result.WebsiteURL, result.TwitterURL, result.TelegramURL, result.ImageURL)
 
 	meetsCriteria := true
@@ -229,63 +230,52 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 		meetsCriteria = false
 		reason := fmt.Sprintf("Liquidity %.2f < %.2f", result.LiquidityUSD, minLiquidity)
 		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
+		log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
 	}
 	if result.MarketCap < minMarketCap {
 		meetsCriteria = false
 		reason := fmt.Sprintf("MarketCap %.2f < %.2f", result.MarketCap, minMarketCap)
 		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
+		log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
 	}
 	if result.MarketCap > maxMarketCap {
 		meetsCriteria = false
 		reason := fmt.Sprintf("MarketCap %.2f > %.2f", result.MarketCap, maxMarketCap)
 		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
+		log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
 	}
 	if result.Volume5m < min5mVolume {
 		meetsCriteria = false
 		reason := fmt.Sprintf("Vol(5m) %.2f < %.2f", result.Volume5m, min5mVolume)
 		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
+		log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
 	}
 	if result.Volume1h < min1hVolume {
 		meetsCriteria = false
 		reason := fmt.Sprintf("Vol(1h) %.2f < %.2f", result.Volume1h, min1hVolume)
 		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
+		log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
 	}
 	if result.Txns5m < min5mTx {
 		meetsCriteria = false
 		reason := fmt.Sprintf("Tx(5m) %d < %d", result.Txns5m, min5mTx)
 		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
-	} else if result.Txns5m > max5mTx {
-		meetsCriteria = false
-		reason := fmt.Sprintf("Tx(5m) %d > %d", result.Txns5m, max5mTx)
-		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
+		log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
 	}
 
 	if result.Txns1h < min1hTx {
 		meetsCriteria = false
 		reason := fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx)
 		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
-	} else if result.Txns1h > max1hTx {
-		meetsCriteria = false
-		reason := fmt.Sprintf("Tx(1h) %d > %d", result.Txns1h, max1hTx)
-		failReasons = append(failReasons, reason)
-		log.Printf("   - FAILED: %s", reason)
+		log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
 	}
-
 	result.IsValid = meetsCriteria
 	result.FailReasons = failReasons
 
 	if meetsCriteria {
-		log.Printf("Token %s meets DexScreener criteria!", tokenCA)
+		log.Printf("INFO: Token %s meets DexScreener criteria!", tokenCA)
 	} else {
-		log.Printf("Token %s did not meet DexScreener criteria.", tokenCA)
+		log.Printf("INFO: Token %s did not meet DexScreener criteria. Reasons: %s", tokenCA, strings.Join(failReasons, "; "))
 	}
 
 	return result, nil
