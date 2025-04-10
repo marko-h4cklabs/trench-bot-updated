@@ -5,7 +5,6 @@ import (
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -171,16 +170,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	tokenCache.Unlock()
 	log.Info("Added token to processing debounce cache", zap.String("tokenAddress", tokenAddress))
 
-	isLocked, lockedErr := CheckLiquidityLock(tokenAddress)
-	lockStatusStr := "Liquidity Locked (>1k): Unknown"
-	if lockedErr != nil {
-		lockStatusStr = fmt.Sprintf("Liquidity Locked (>1k): Check Failed (%s)", lockedErr.Error())
-		log.Warn("Failed liquidity lock check", zap.String("token", tokenAddress), zap.Error(lockedErr))
-	} else {
-		lockStatusStr = fmt.Sprintf("Liquidity Locked (>1k): %t", isLocked)
-	}
-	log.Info("Liquidity lock check result", zap.String("token", tokenAddress), zap.String("status", lockStatusStr), zap.Bool("isLocked", isLocked))
-
 	validationResult, validationErr := IsTokenValid(tokenAddress)
 
 	if validationErr != nil {
@@ -202,6 +191,7 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	log.Info("Token passed validation! Preparing notification...", zap.String("token", tokenAddress))
 
 	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
+
 	var ageStr string
 	if validationResult.PairCreatedAtTimestamp > 0 {
 		creationTime := time.Unix(validationResult.PairCreatedAtTimestamp/1000, 0)
@@ -209,23 +199,23 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 		ageStr = formatDurationSimple(ageDuration)
 	} else {
 		ageStr = "Unknown"
+		log.Warn("PairCreatedAtTimestamp missing or zero, cannot calculate age", zap.String("token", tokenAddress))
 	}
 	ageStrEsc := notifications.EscapeMarkdownV2(ageStr)
+
 	criteriaDetails := fmt.Sprintf(
 		"🩸 Liquidity: `$%.0f` \n"+
 			"🏛️ Market Cap: `$%.0f` \n"+
 			"⌛ \\(5m\\) Volume : `$%.0f` \n"+
 			"⏳ \\(1h\\) Volume : `$%.0f` \n"+
 			"🔎 \\(5m\\) TXNs : `%d` \n"+
-			"🔍 \\(1h\\) TXNs : `%d`"+
-			"⏰ Age: %s\n",
+			"🔍 \\(1h\\) TXNs : `%d`",
 		validationResult.LiquidityUSD,
 		validationResult.MarketCap,
 		validationResult.Volume5m,
 		validationResult.Volume1h,
 		validationResult.Txns5m,
 		validationResult.Txns1h,
-		ageStrEsc,
 	)
 
 	var socialLinksBuilder strings.Builder
@@ -246,21 +236,25 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 
 	socialsSection := ""
 	if hasSocials {
-		socialsSection = "\\-\\-\\- Socials \\-\\-\\-\n" + socialLinksBuilder.String() + "\n"
+		socialsSection = "\\-\\-\\- Socials \\-\\-\\-\n" + socialLinksBuilder.String()
 	}
 
 	caption := fmt.Sprintf(
 		"*Token Graduated & Validated\\!* \n\n"+
+			"⏰ Age: %s\n"+
 			"CA: `%s`\n\n"+
 			"DexScreener: %s\n\n"+
 			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
 			"%s\n\n"+
 			"%s",
+		ageStrEsc,
 		tokenAddress,
 		dexscreenerURLEsc,
 		criteriaDetails,
 		socialsSection,
 	)
+
+	caption = strings.TrimRight(caption, "\n")
 
 	if validationResult.ImageURL != "" {
 		notifications.SendPhotoMessage(validationResult.ImageURL, caption)
@@ -272,6 +266,7 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	}
 
 	time.Sleep(1 * time.Second)
+
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
@@ -327,155 +322,16 @@ func extractGraduatedToken(event map[string]interface{}) (string, bool) {
 	return "", false
 }
 
-func ValidateCachedTokens() {
-	validationInterval := 3 * time.Minute
-	cacheExpiry := 20 * time.Minute
-
-	log.Printf("Periodic graduated token validation routine started (Interval: %v, Expiry: %v)", validationInterval, cacheExpiry)
-	ticker := time.NewTicker(validationInterval)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		log.Println("Running periodic graduated token validation check...")
-		tokensToRemove := []string{}
-		tokensToValidate := []string{}
-
-		graduatedTokenCache.Lock()
-		now := time.Now()
-		for token, addedTime := range graduatedTokenCache.Data {
-			if now.Sub(addedTime) > cacheExpiry {
-				tokensToRemove = append(tokensToRemove, token)
-			} else {
-				tokensToValidate = append(tokensToValidate, token)
-			}
-		}
-
-		for _, token := range tokensToRemove {
-			delete(graduatedTokenCache.Data, token)
-			log.Printf("[DEBUG] Removed expired token from graduatedTokenCache: %s", token)
-		}
-		graduatedTokenCache.Unlock()
-
-		log.Printf("Checking %d non-expired graduated tokens.", len(tokensToValidate))
-		validatedCount := 0
-		failedCount := 0
-
-		for _, token := range tokensToValidate {
-			validationResult, err := IsTokenValid(token)
-			if err != nil {
-				log.Printf("[WARN] Error validating %s during periodic check: %v", token, err)
-				failedCount++
-				continue
-			}
-
-			if validationResult != nil && validationResult.IsValid {
-				validatedCount++
-				log.Printf("[INFO] Token %s remains valid during periodic check.", token)
-			} else {
-				failedCount++
-				reason := "Unknown reason"
-				if validationResult != nil && len(validationResult.FailReasons) > 0 {
-					reason = strings.Join(validationResult.FailReasons, "; ")
-				} else if validationResult != nil && !validationResult.IsValid {
-					reason = "Did not meet criteria"
-				}
-				log.Printf("[INFO] Token %s no longer valid during periodic check. Reason: %s", token, reason)
-			}
-		}
-		log.Printf("Periodic validation check complete. Valid now: %d, Invalid/Error: %d", validatedCount, failedCount)
-	}
-}
-
 func init() {
 	log.Println("Initializing Graduation Service background tasks...")
-}
-
-func CheckLiquidityLock(mintAddress string) (bool, error) {
-	if err := dexScreenerLimiter.Wait(context.Background()); err != nil {
-		log.Printf("ERROR: DexScreener rate limiter wait error during *liquidity check* for %s: %v", mintAddress, err)
-		return false, fmt.Errorf("rate limiter error during liquidity check for %s: %w", mintAddress, err)
-	}
-
-	url := fmt.Sprintf("https://api.dexscreener.com/v1/solana/tokens/%s", mintAddress)
-	client := &http.Client{Timeout: 7 * time.Second}
-
-	resp, err := client.Get(url)
-	if err != nil {
-		log.Printf("Error: Liquidity check API request failed for %s: %v", mintAddress, err)
-		return false, fmt.Errorf("API request failed for %s: %w", mintAddress, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		log.Printf("Rate limit hit (429) during liquidity check for %s.", mintAddress)
-		return false, fmt.Errorf("rate limit exceeded (429)")
-	} else if resp.StatusCode == http.StatusNotFound {
-		log.Printf("Info: Liquidity info N/A via DexScreener token endpoint for %s (404). Assuming not locked.", mintAddress)
-		return false, nil
-	} else if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		errorMsg := fmt.Sprintf("Liquidity check API request failed for %s status: %s", mintAddress, resp.Status)
-		if readErr == nil && len(bodyBytes) > 0 {
-			errorMsg += fmt.Sprintf(". Body: %s", string(bodyBytes))
-		} else if readErr != nil {
-			errorMsg += fmt.Sprintf(". Failed to read response body: %v", readErr)
-		}
-		log.Println(errorMsg)
-		return false, fmt.Errorf("API request failed status: %s", resp.Status)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Error reading liquidity API response body for %s: %v", mintAddress, err)
-		return false, fmt.Errorf("error reading API response for %s: %w", mintAddress, err)
-	}
-
-	var tokenInfo struct {
-		Pairs []struct {
-			PairAddress string     `json:"pairAddress"`
-			Liquidity   *Liquidity `json:"liquidity"`
-		} `json:"pairs"`
-	}
-
-	err = json.Unmarshal(body, &tokenInfo)
-	if err != nil {
-		log.Printf("Error: JSON parsing failed for liquidity response %s: %v. Raw Response: %s", mintAddress, err, string(body))
-		return false, fmt.Errorf("JSON parsing failed for %s: %w", mintAddress, err)
-	}
-
-	if len(tokenInfo.Pairs) == 0 {
-		log.Printf("Info: No pairs found in DexScreener token info for %s. Assuming not locked.", mintAddress)
-		return false, nil
-	}
-
-	highestLiquidity := 0.0
-	foundLiquidityData := false
-	for _, pair := range tokenInfo.Pairs {
-		if pair.Liquidity != nil && pair.Liquidity.Usd > 0 {
-			foundLiquidityData = true
-			if pair.Liquidity.Usd > highestLiquidity {
-				highestLiquidity = pair.Liquidity.Usd
-			}
-		}
-	}
-
-	if !foundLiquidityData {
-		log.Printf("Info: Pairs found for %s, but none contained valid liquidity data. Assuming not locked.", mintAddress)
-		return false, nil
-	}
-
-	const liquidityLockThreshold = 1000.0
-	isLocked := highestLiquidity > liquidityLockThreshold
-
-	log.Printf("Info: Liquidity lock status for %s: %t (Highest Liq: $%.2f, Threshold: $%.2f)",
-		mintAddress, isLocked, highestLiquidity, liquidityLockThreshold)
-
-	return isLocked, nil
 }
 
 func formatDurationSimple(d time.Duration) string {
 	if d < time.Minute {
 		seconds := int(math.Round(d.Seconds()))
+		if seconds == 0 && d > 0 {
+			seconds = 1
+		}
 		return fmt.Sprintf("%ds", seconds)
 	}
 	if d < time.Hour {
