@@ -17,6 +17,16 @@ import (
 	"go.uber.org/zap"
 )
 
+type TrackedTokenInfo struct {
+	BaselineMarketCap float64
+	AddedAt           time.Time
+}
+
+var trackedProgressCache = struct {
+	sync.Mutex
+	Data map[string]TrackedTokenInfo
+}{Data: make(map[string]TrackedTokenInfo)}
+
 type WebhookRequest struct {
 	WebhookURL       string   `json:"webhookURL"`
 	TransactionTypes []string `json:"transactionTypes"`
@@ -260,6 +270,20 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	graduatedTokenCache.Unlock()
 	log.Info("Added token to graduatedTokenCache", zap.String("token", tokenAddress))
 	TrackGraduatedToken(tokenAddress)
+
+	if validationResult != nil && validationResult.IsValid && validationResult.MarketCap > 0 {
+		trackedProgressCache.Lock()
+		trackedProgressCache.Data[tokenAddress] = TrackedTokenInfo{
+			BaselineMarketCap: validationResult.MarketCap,
+			AddedAt:           time.Now(),
+		}
+		trackedProgressCache.Unlock()
+		log.Info("Added token to progress tracking cache",
+			zap.String("token", tokenAddress),
+			zap.Float64("baselineMC", validationResult.MarketCap),
+		)
+	}
+
 }
 
 func extractGraduatedToken(event map[string]interface{}) (string, bool) {
@@ -308,6 +332,73 @@ func extractGraduatedToken(event map[string]interface{}) (string, bool) {
 	return "", false
 }
 
+func CheckTokenProgress() {
+	checkInterval := 10 * time.Minute
+	log.Println("Token progress tracking routine started", "interval", checkInterval)
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		log.Println("Running token progress check...")
+
+		tokensToCheck := make(map[string]TrackedTokenInfo)
+		trackedProgressCache.Lock()
+		for addr, info := range trackedProgressCache.Data {
+			tokensToCheck[addr] = info
+		}
+		trackedProgressCache.Unlock()
+
+		log.Printf("Checking progress for %d tokens\n", len(tokensToCheck))
+		tokensToRemove := []string{}
+
+		for tokenAddress, trackedInfo := range tokensToCheck {
+			log.Printf("DEBUG: Checking progress for %s\n", tokenAddress)
+
+			currentValidationResult, err := IsTokenValid(tokenAddress)
+
+			if err != nil {
+				log.Printf("WARN: Error fetching current data for progress check for token %s: %v\n", tokenAddress, err)
+				continue
+			}
+
+			if currentValidationResult != nil && currentValidationResult.MarketCap > 0 {
+				currentMarketCap := currentValidationResult.MarketCap
+				baselineMarketCap := trackedInfo.BaselineMarketCap
+
+				if currentMarketCap >= (baselineMarketCap * 2) {
+					log.Printf("INFO: Token %s hit 2x market cap! Baseline: %.0f, Current: %.0f\n", tokenAddress, baselineMarketCap, currentMarketCap)
+
+					message := fmt.Sprintf(
+						"🚀 Token `%s` just did 2x from verification\\!\n\n"+
+							"Initial MC: `$%.0f`\n"+
+							"Current MC: `$%.0f`\n\n"+
+							"DexScreener: %s",
+						tokenAddress,
+						baselineMarketCap,
+						currentMarketCap,
+						notifications.EscapeMarkdownV2(fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)),
+					)
+
+					notifications.SendTelegramMessage(message)
+					tokensToRemove = append(tokensToRemove, tokenAddress)
+				}
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		if len(tokensToRemove) > 0 {
+			trackedProgressCache.Lock()
+			for _, addr := range tokensToRemove {
+				delete(trackedProgressCache.Data, addr)
+				log.Printf("INFO: Removed token %s from progress tracking cache (hit 2x)\n", addr)
+			}
+			trackedProgressCache.Unlock()
+		}
+		log.Println("Token progress check finished.")
+	}
+}
+
 func init() {
 	log.Println("Initializing Graduation Service background tasks...")
+	go CheckTokenProgress()
 }
