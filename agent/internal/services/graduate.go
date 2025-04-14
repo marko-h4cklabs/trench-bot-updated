@@ -271,7 +271,7 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	log.Info("Added token to graduatedTokenCache", zap.String("token", tokenAddress))
 	TrackGraduatedToken(tokenAddress)
 
-	if validationResult != nil && validationResult.IsValid && validationResult.MarketCap > 0 {
+	if validationResult.MarketCap > 0 {
 		trackedProgressCache.Lock()
 		trackedProgressCache.Data[tokenAddress] = TrackedTokenInfo{
 			BaselineMarketCap: validationResult.MarketCap,
@@ -283,7 +283,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 			zap.Float64("baselineMC", validationResult.MarketCap),
 		)
 	}
-
 }
 
 func extractGraduatedToken(event map[string]interface{}) (string, bool) {
