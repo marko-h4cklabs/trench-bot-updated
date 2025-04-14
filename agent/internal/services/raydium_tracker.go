@@ -6,6 +6,7 @@ import (
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/notifications"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -469,12 +470,18 @@ func ValidateAndNotifyCachedSwaps() {
 			validationResult, err := IsTokenValid(token)
 
 			if err != nil {
-				log.Printf(" Error checking token %s during validation loop: %v", token, err)
+				if errors.Is(err, ErrRateLimited) {
+					log.Printf(" WARN: DexScreener rate limited checking token %s during validation loop. Will retry next cycle.", token)
+					failedCount++
+					continue
+				}
+
+				log.Printf(" ERROR checking token %s during validation loop: %v", token, err)
 				failedCount++
 				swapCache.Lock()
 				delete(swapCache.Data, token)
 				swapCache.Unlock()
-				log.Printf("   Removed token %s from cache due to validation error.", token)
+				log.Printf("   Removed token %s from cache due to non-rate-limit validation error.", token)
 				continue
 			}
 
@@ -518,7 +525,7 @@ func ValidateAndNotifyCachedSwaps() {
 				log.Printf("   Removed failed/invalid token %s from cache.", token)
 			}
 		}
-		log.Printf("Validation check complete. Processed %d tokens this cycle. Validated & Notified: %d, Failed/Removed: %d",
+		log.Printf("Validation check complete. Processed %d tokens this cycle. Validated & Notified: %d, Failed/RateLimited: %d",
 			processedCount, validatedCount, failedCount)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -181,10 +182,20 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 	log.Info("Added token to processing debounce cache", zap.String("tokenAddress", tokenAddress))
 
 	validationResult, validationErr := IsTokenValid(tokenAddress)
+
 	if validationErr != nil {
-		log.Error("Error checking DexScreener criteria", zap.String("token", tokenAddress), zap.Error(validationErr))
+		if errors.Is(validationErr, ErrRateLimited) {
+			log.Warn("DexScreener rate limited while checking graduated token. Skipping processing for now.",
+				zap.String("token", tokenAddress),
+				zap.Error(validationErr))
+			return
+		}
+		log.Error("Error checking DexScreener criteria",
+			zap.String("token", tokenAddress),
+			zap.Error(validationErr))
 		return
 	}
+
 	if validationResult == nil || !validationResult.IsValid {
 		reason := "Unknown validation failure"
 		if validationResult != nil && len(validationResult.FailReasons) > 0 {
@@ -267,6 +278,7 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 		notifications.SendTelegramMessage(caption)
 		log.Info("Telegram text notification initiated (icon missing)", zap.String("token", tokenAddress))
 	}
+
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
