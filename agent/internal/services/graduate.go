@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"ca-scraper/agent/internal/events"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
@@ -159,12 +160,13 @@ func HandleWebhook(payload []byte, log *logger.Logger) {
 }
 
 func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
-	log.Debug("Processing event", zap.Any("event", event))
+	log.Debug("Processing graduation event", zap.Any("event", event))
 
-	tokenAddress, ok := extractGraduatedToken(event)
+	tokenAddress, ok := events.ExtractNonSolMintFromEvent(event)
 	if !ok {
 		return
 	}
+	log.Debug("Extracted token address", zap.String("tokenAddress", tokenAddress))
 
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
@@ -174,18 +176,15 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 		log.Info("Token already processed recently, skipping.", zap.String("tokenAddress", tokenAddress))
 		return
 	}
-
 	tokenCache.Tokens[tokenAddress] = time.Now()
 	tokenCache.Unlock()
 	log.Info("Added token to processing debounce cache", zap.String("tokenAddress", tokenAddress))
 
 	validationResult, validationErr := IsTokenValid(tokenAddress)
-
 	if validationErr != nil {
 		log.Error("Error checking DexScreener criteria", zap.String("token", tokenAddress), zap.Error(validationErr))
 		return
 	}
-
 	if validationResult == nil || !validationResult.IsValid {
 		reason := "Unknown validation failure"
 		if validationResult != nil && len(validationResult.FailReasons) > 0 {
@@ -218,7 +217,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
-
 	if validationResult.WebsiteURL != "" {
 		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", notifications.EscapeMarkdownV2(validationResult.WebsiteURL)))
 		hasSocials = true
@@ -231,40 +229,44 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 		socialLinksBuilder.WriteString(fmt.Sprintf("✈️ Telegram: %s\n", notifications.EscapeMarkdownV2(validationResult.TelegramURL)))
 		hasSocials = true
 	}
-
 	socialsSection := ""
 	if hasSocials {
 		socialsSection = "\\-\\-\\- Socials \\-\\-\\-\n" + socialLinksBuilder.String()
 	}
 
+	var iconStatus string
+	usePhoto := false
+	if validationResult.ImageURL != "" {
+		iconStatus = "✅ Icon Found"
+		usePhoto = true
+	} else {
+		iconStatus = "❌ Icon Missing"
+		usePhoto = false
+	}
+
 	caption := fmt.Sprintf(
 		"*Token Graduated & Validated\\!* \n\n"+
-			"CA: `%s`\n\n"+
+			"CA: `%s`\n"+
+			"Icon: %s\n\n"+
 			"DexScreener: %s\n\n"+
 			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
 			"%s\n\n"+
 			"%s",
 		tokenAddress,
+		iconStatus,
 		dexscreenerURLEsc,
 		criteriaDetails,
 		socialsSection,
 	)
-
 	caption = strings.TrimRight(caption, "\n")
 
-	if validationResult.ImageURL != "" {
+	if usePhoto {
 		notifications.SendPhotoMessage(validationResult.ImageURL, caption)
-		log.Info("Telegram photo notification initiated", zap.String("token", tokenAddress))
+		log.Info("Telegram photo notification initiated (icon found)", zap.String("token", tokenAddress))
 	} else {
 		notifications.SendTelegramMessage(caption)
-		log.Warn("Token image URL not found, sending text notification", zap.String("token", tokenAddress))
-		log.Info("Telegram text notification initiated", zap.String("token", tokenAddress))
+		log.Info("Telegram text notification initiated (icon missing)", zap.String("token", tokenAddress))
 	}
-
-	time.Sleep(1 * time.Second)
-	notifications.SendTelegramMessage(tokenAddress)
-	log.Info("Follow-up CA message initiated.", zap.String("token", tokenAddress))
-
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
@@ -283,52 +285,6 @@ func processGraduatedToken(event map[string]interface{}, log *logger.Logger) {
 			zap.Float64("baselineMC", validationResult.MarketCap),
 		)
 	}
-}
-
-func extractGraduatedToken(event map[string]interface{}) (string, bool) {
-	if transfers, hasTransfers := event["tokenTransfers"].([]interface{}); hasTransfers {
-		for _, transfer := range transfers {
-			if transferMap, ok := transfer.(map[string]interface{}); ok {
-				mint, mintOk := transferMap["mint"].(string)
-				amountStr, amountOk := transferMap["tokenAmount"].(float64)
-				userAccount, _ := transferMap["toUserAccount"].(string)
-				if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" && amountOk && amountStr > 0 {
-					log.Printf("Extracted Token Address '%s' from tokenTransfers (Amount: %f, To: %s)", mint, amountStr, userAccount)
-					return mint, true
-				}
-			}
-		}
-	}
-	if events, hasEvents := event["events"].(map[string]interface{}); hasEvents {
-		if swapEvent, hasSwap := events["swap"].(map[string]interface{}); hasSwap {
-			if tokenOutputs, has := swapEvent["tokenOutputs"].([]interface{}); has {
-				for _, output := range tokenOutputs {
-					if outputMap, ok := output.(map[string]interface{}); ok {
-						mint, mintOk := outputMap["mint"].(string)
-						amount, amountOk := outputMap["tokenAmount"].(float64)
-						if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" && amountOk && amount > 0 {
-							log.Printf("Extracted Token Address '%s' from events.swap.tokenOutputs", mint)
-							return mint, true
-						}
-					}
-				}
-			}
-			if tokenInputs, has := swapEvent["tokenInputs"].([]interface{}); has {
-				for _, input := range tokenInputs {
-					if inputMap, ok := input.(map[string]interface{}); ok {
-						mint, mintOk := inputMap["mint"].(string)
-						amount, amountOk := inputMap["tokenAmount"].(float64)
-						if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" && amountOk && amount > 0 {
-							log.Printf("Extracted Token Address '%s' from events.swap.tokenInputs", mint)
-							return mint, true
-						}
-					}
-				}
-			}
-		}
-	}
-	log.Println("Could not extract target token address from graduation event.")
-	return "", false
 }
 
 func CheckTokenProgress() {

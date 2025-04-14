@@ -7,8 +7,8 @@ import (
 
 var swapCache = struct {
 	sync.RWMutex
-	Data map[string][]float64
-}{Data: make(map[string][]float64)}
+	Data map[string]SwapCacheEntry
+}{Data: make(map[string]SwapCacheEntry)}
 
 type WebhookCache struct {
 	sync.Mutex

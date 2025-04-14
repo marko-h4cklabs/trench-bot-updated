@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"ca-scraper/agent/internal/events"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/notifications"
 	"encoding/json"
@@ -27,6 +28,11 @@ var seenTransactions = struct {
 	TxIDs map[string]struct{}
 }{TxIDs: make(map[string]struct{})}
 
+type SwapCacheEntry struct {
+	Volumes     []float64
+	LastUpdated time.Time
+}
+
 func TrackGraduatedToken(tokenAddress string) {
 	log.Printf("Monitoring swaps for newly graduated token: %s", tokenAddress)
 	go func() {
@@ -35,56 +41,10 @@ func TrackGraduatedToken(tokenAddress string) {
 	}()
 }
 
-func StartDexScreenerValidation() {
-	log.Println("DexScreener Validation Loop Started (using centralized check!)")
-	for {
-		time.Sleep(4 * time.Minute)
-		validateCachedTokens()
-	}
-}
-
-func validateCachedTokens() {
-	swapCache.RLock()
-	cacheLen := len(swapCache.Data)
-	tokensToCheck := make(map[string][]float64, cacheLen)
-	for token, volumes := range swapCache.Data {
-		tokensToCheck[token] = volumes
-	}
-	swapCache.RUnlock()
-
-	log.Printf("Running validation check on %d cached tokens...", cacheLen)
-	validatedCount := 0
-	failedCount := 0
-
-	for token, volumes := range tokensToCheck {
-		totalVolume := sum(volumes)
-		if totalVolume >= 500 {
-			log.Printf("Checking DexScreener eligibility for token %s (Volume: %.2f)", token, totalVolume)
-
-			validationResult, err := IsTokenValid(token)
-			if err != nil {
-				log.Printf(" DexScreener check failed for %s: %v", token, err)
-				failedCount++
-				continue
-			}
-
-			if validationResult != nil && validationResult.IsValid {
-				validatedCount++
-				log.Printf("Token %s meets DexScreener criteria via periodic check!", token)
-
-			} else {
-				failedCount++
-
-				reason := "Did not meet criteria or validation failed"
-				if validationResult != nil && len(validationResult.FailReasons) > 0 {
-					reason = strings.Join(validationResult.FailReasons, "; ")
-				}
-				log.Printf("Token %s failed DexScreener validation via periodic check. Reason: %s", token, reason)
-			}
-		}
-	}
-	log.Printf("Finished validation check. Validated: %d, Failed/Not Valid: %d", validatedCount, failedCount)
-}
+const (
+	validationVolumeThreshold = 500.0
+	validationCheckInterval   = 3 * time.Minute
+)
 
 func HandleTransactionWebhookWithPayload(transactions []map[string]interface{}) {
 	processedCount := 0
@@ -146,9 +106,18 @@ func processSwapTransaction(tx map[string]interface{}) bool {
 	}
 
 	swapCache.Lock()
-	swapCache.Data[tokenMint] = append(swapCache.Data[tokenMint], usdValue)
+	entry, exists := swapCache.Data[tokenMint]
+	if !exists {
+		entry = SwapCacheEntry{
+			Volumes: make([]float64, 0, 1),
+		}
+	}
+	entry.Volumes = append(entry.Volumes, usdValue)
+	entry.LastUpdated = time.Now()
+	swapCache.Data[tokenMint] = entry
 	swapCache.Unlock()
-	log.Printf("Cached swap for token: %s with value $%.2f (Tx: %s)", tokenMint, usdValue, txSignature)
+
+	log.Printf("Cached swap for token: %s with value $%.2f (Tx: %s). Total cached volume: %.2f", tokenMint, usdValue, txSignature, sum(entry.Volumes))
 
 	return true
 }
@@ -210,59 +179,14 @@ func HandleTransactionWebhook(c *gin.Context) {
 		seenTransactions.TxIDs[txSignature] = struct{}{}
 		seenTransactions.Unlock()
 
-		var tokenMint string
-		var foundMint bool
-		if transfers, hasTransfers := tx["tokenTransfers"].([]interface{}); hasTransfers {
-			for _, transfer := range transfers {
-				if transferMap, ok := transfer.(map[string]interface{}); ok {
-					mint, mintOk := transferMap["mint"].(string)
-					if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
-						tokenMint = mint
-						foundMint = true
-						break
-					}
-				}
-			}
-		}
-		if !foundMint {
-			if events, hasEvents := tx["events"].(map[string]interface{}); hasEvents {
-				if swapEvent, hasSwap := events["swap"].(map[string]interface{}); hasSwap {
-					if tokenOutputs, hasOutputs := swapEvent["tokenOutputs"].([]interface{}); hasOutputs {
-						for _, output := range tokenOutputs {
-							if outputMap, ok := output.(map[string]interface{}); ok {
-								mint, mintOk := outputMap["mint"].(string)
-								if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
-									tokenMint = mint
-									foundMint = true
-									break
-								}
-							}
-						}
-					}
-					if !foundMint {
-						if tokenInputs, hasInputs := swapEvent["tokenInputs"].([]interface{}); hasInputs {
-							for _, input := range tokenInputs {
-								if inputMap, ok := input.(map[string]interface{}); ok {
-									mint, mintOk := inputMap["mint"].(string)
-									if mintOk && mint != "" && mint != "So11111111111111111111111111111111111111112" {
-										tokenMint = mint
-										foundMint = true
-										break
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
+		tokenMint, foundMint := events.ExtractNonSolMintFromEvent(tx)
 
-		if !foundMint || tokenMint == "" {
+		if !foundMint {
 			log.Printf("Could not extract relevant non-SOL token mint from webhook transaction %s, skipping validation.", txSignature)
 			continue
 		}
 
-		log.Printf("Performing immediate DexScreener check for token %s from webhook tx %s", tokenMint, txSignature)
+		log.Printf("Extracted token %s from webhook tx %s, performing immediate check.", tokenMint, txSignature)
 
 		validationResult, err := IsTokenValid(tokenMint)
 		if err != nil {
@@ -271,7 +195,6 @@ func HandleTransactionWebhook(c *gin.Context) {
 		}
 
 		if validationResult == nil || !validationResult.IsValid {
-
 			reason := "Did not meet criteria or validation failed"
 			if validationResult != nil && len(validationResult.FailReasons) > 0 {
 				reason = strings.Join(validationResult.FailReasons, "; ")
@@ -290,10 +213,9 @@ func HandleTransactionWebhook(c *gin.Context) {
 			"Hot Swap Validated\\! \nToken: `%s`\nDexScreener: %s\nTx: `%s`",
 			tokenMint,
 			dexscreenerLinkEsc,
-			notifications.EscapeMarkdownV2(txSignature), // Escape Tx Signature
+			notifications.EscapeMarkdownV2(txSignature),
 		)
 		notifications.SendTelegramMessage(telegramMessage)
-
 	}
 
 	log.Printf("Webhook handler finished. Processed: %d transaction(s), Immediately validated & notified: %d", len(transactions), validatedCount)
@@ -499,80 +421,6 @@ func TestWebhookWithAuth() {
 	}
 }
 
-func ValidateCachedSwaps() {
-	log.Println("ValidateCachedSwaps Loop Started...")
-	for {
-		time.Sleep(4 * time.Minute)
-
-		log.Println("Running ValidateCachedSwaps check...")
-
-		swapCache.RLock()
-		tokensToValidate := make([]string, 0, len(swapCache.Data))
-		volumeMap := make(map[string]float64, len(swapCache.Data))
-		const validationVolumeThreshold = 620
-		for token, volumes := range swapCache.Data {
-			totalVolume := sum(volumes)
-			if totalVolume >= validationVolumeThreshold {
-				tokensToValidate = append(tokensToValidate, token)
-				volumeMap[token] = totalVolume
-			}
-		}
-		cacheSize := len(swapCache.Data)
-		swapCache.RUnlock()
-
-		log.Printf("Found %d tokens in cache, %d meet volume threshold ($%.2f) for validation.", cacheSize, len(tokensToValidate), float64(validationVolumeThreshold))
-
-		validatedCount := 0
-		failedCount := 0
-		for _, token := range tokensToValidate {
-
-			log.Printf("Checking cached token %s (Vol: $%.2f) via ValidateCachedSwaps loop.", token, volumeMap[token])
-
-			validationResult, err := IsTokenValid(token)
-			if err != nil {
-				log.Printf(" Error checking token %s during ValidateCachedSwaps: %v", token, err)
-				failedCount++
-
-				continue
-			}
-
-			if validationResult != nil && validationResult.IsValid {
-				validatedCount++
-				log.Printf("Token %s (Vol: $%.2f) validated via ValidateCachedSwaps loop.", token, volumeMap[token])
-
-				dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", token)
-				dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
-
-				telegramMessage := fmt.Sprintf(
-					" Tracking validated swap token: `%s`\nDexScreener: %s",
-					token,
-					dexscreenerLinkEsc,
-				)
-				notifications.SendTelegramMessage(telegramMessage)
-
-				swapCache.Lock()
-				delete(swapCache.Data, token)
-				swapCache.Unlock()
-				log.Printf("   Removed validated token %s from cache.", token)
-			} else {
-				failedCount++
-
-				reason := "Did not meet criteria or validation failed"
-				if validationResult != nil && len(validationResult.FailReasons) > 0 {
-					reason = strings.Join(validationResult.FailReasons, "; ")
-				}
-				log.Printf("Token %s (Vol: $%.2f) failed validation via ValidateCachedSwaps loop. Reason: %s", token, volumeMap[token], reason)
-
-				swapCache.Lock()
-				delete(swapCache.Data, token)
-				swapCache.Unlock()
-				log.Printf("   Removed failed/invalid token %s from cache.", token)
-			}
-		}
-		log.Printf("ValidateCachedSwaps check complete. Validated: %d, Failed/Not Valid: %d", validatedCount, failedCount)
-	}
-}
-
 func sum(volumes []float64) float64 {
 	var total float64
 	for _, v := range volumes {
@@ -581,23 +429,144 @@ func sum(volumes []float64) float64 {
 	return total
 }
 
-func init() {
-	go ValidateCachedSwaps()
-	go ClearSwapCacheEvery1Hours()
-	log.Println("Raydium Tracker service background routines started.")
-}
+func ValidateAndNotifyCachedSwaps() {
+	log.Printf("Swap validation & notification loop started (Interval: %v, Volume Threshold: $%.2f).",
+		validationCheckInterval, validationVolumeThreshold)
 
-func ClearSwapCacheEvery1Hours() {
-	clearInterval := 1 * time.Hour
-	log.Printf("Swap cache clearing routine started (interval: %v).", clearInterval)
-	ticker := time.NewTicker(clearInterval)
+	ticker := time.NewTicker(validationCheckInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		swapCache.Lock()
+		log.Println("Running validation check on cached swaps...")
+
+		swapCache.RLock()
+		tokensToValidate := make(map[string]float64)
+		cacheSize := len(swapCache.Data)
+
+		for token, entry := range swapCache.Data {
+			if entry.Volumes == nil {
+				log.Printf("WARN: Found cache entry with nil Volumes for token %s. Skipping.", token)
+				continue
+			}
+			totalVolume := sum(entry.Volumes)
+			if totalVolume >= validationVolumeThreshold {
+				tokensToValidate[token] = totalVolume
+			}
+		}
+		swapCache.RUnlock()
+
+		log.Printf("Found %d tokens in cache. Checking %d token(s) meeting volume threshold ($%.2f).",
+			cacheSize, len(tokensToValidate), validationVolumeThreshold)
+
+		validatedCount := 0
+		failedCount := 0
+		processedCount := 0
+
+		for token, totalVolume := range tokensToValidate {
+			processedCount++
+			log.Printf("Checking cached token %s (Vol: $%.2f) via validation loop.", token, totalVolume)
+
+			validationResult, err := IsTokenValid(token)
+
+			if err != nil {
+				log.Printf(" Error checking token %s during validation loop: %v", token, err)
+				failedCount++
+				swapCache.Lock()
+				delete(swapCache.Data, token)
+				swapCache.Unlock()
+				log.Printf("   Removed token %s from cache due to validation error.", token)
+				continue
+			}
+
+			if validationResult != nil && validationResult.IsValid {
+				validatedCount++
+				log.Printf("Token %s (Vol: $%.2f) PASSED validation via loop.", token, totalVolume)
+
+				dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", token)
+				dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
+
+				telegramMessage := fmt.Sprintf(
+					"✅ Validated Swap Token (Volume Check)\n\n"+
+						"CA: `%s`\n"+
+						"Volume Trigger: `$%.2f`\n\n"+
+						"DexScreener: %s\n\n"+
+						"*(Removed from volume tracking cache)*",
+					token,
+					totalVolume,
+					dexscreenerLinkEsc,
+				)
+				notifications.SendTelegramMessage(telegramMessage)
+
+				swapCache.Lock()
+				delete(swapCache.Data, token)
+				swapCache.Unlock()
+				log.Printf("   Removed validated token %s from cache.", token)
+
+			} else {
+				failedCount++
+				reason := "Did not meet criteria or validation failed (nil result)"
+				if validationResult != nil && len(validationResult.FailReasons) > 0 {
+					reason = strings.Join(validationResult.FailReasons, "; ")
+				} else if validationResult != nil && !validationResult.IsValid {
+					reason = "Did not meet criteria (no specific reasons returned)"
+				}
+				log.Printf("Token %s (Vol: $%.2f) FAILED validation via loop. Reason: %s", token, totalVolume, reason)
+
+				swapCache.Lock()
+				delete(swapCache.Data, token)
+				swapCache.Unlock()
+				log.Printf("   Removed failed/invalid token %s from cache.", token)
+			}
+		}
+		log.Printf("Validation check complete. Processed %d tokens this cycle. Validated & Notified: %d, Failed/Removed: %d",
+			processedCount, validatedCount, failedCount)
+	}
+}
+
+func init() {
+	go ValidateAndNotifyCachedSwaps()
+	go CleanSwapCachePeriodically()
+	log.Println("Raydium Tracker service background routines started.")
+}
+
+const (
+	swapCacheMaxRetention    = 30 * time.Minute
+	swapCacheCleanupInterval = 5 * time.Minute
+)
+
+func CleanSwapCachePeriodically() {
+	log.Printf("Swap cache cleanup routine started (Interval: %v, Retention: %v).", swapCacheCleanupInterval, swapCacheMaxRetention)
+	ticker := time.NewTicker(swapCacheCleanupInterval)
+	defer ticker.Stop()
+
+	for currentTime := range ticker.C {
+		log.Printf("Running periodic swap cache cleanup...")
+		tokensToDelete := []string{}
+		cutoffTime := currentTime.Add(-swapCacheMaxRetention)
+
+		swapCache.RLock()
 		cacheSizeBefore := len(swapCache.Data)
-		swapCache.Data = make(map[string][]float64)
-		swapCache.Unlock()
-		log.Printf("Cleared swapCache. Removed %d entries.", cacheSizeBefore)
+		for token, entry := range swapCache.Data {
+			if entry.LastUpdated.Before(cutoffTime) {
+				tokensToDelete = append(tokensToDelete, token)
+			}
+		}
+		swapCache.RUnlock()
+
+		if len(tokensToDelete) > 0 {
+			swapCache.Lock()
+			deletedCount := 0
+			for _, token := range tokensToDelete {
+				if entry, exists := swapCache.Data[token]; exists && entry.LastUpdated.Before(cutoffTime) {
+					delete(swapCache.Data, token)
+					deletedCount++
+				}
+			}
+			swapCache.Unlock()
+			log.Printf("Periodic swap cache cleanup finished. Removed %d expired entries (older than %v). Cache size before: %d, after: %d.",
+				deletedCount, swapCacheMaxRetention, cacheSizeBefore, cacheSizeBefore-deletedCount)
+		} else {
+			log.Printf("Periodic swap cache cleanup finished. No expired entries found. Cache size: %d", cacheSizeBefore)
+		}
 	}
 }
