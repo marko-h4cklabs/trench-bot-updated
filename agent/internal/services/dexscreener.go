@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -19,15 +20,15 @@ import (
 var dexScreenerLimiter = rate.NewLimiter(rate.Limit(4.66), 5)
 
 const (
-	dexScreenerAPI = "https://api.dexscreener.com/tokens/v1/solana"
-
-	minLiquidity = 40000.0
-	minMarketCap = 26000.0
-	maxMarketCap = 300000.0
-	min5mVolume  = 1000.0
-	min1hVolume  = 10000.0
-	min5mTx      = 100
-	min1hTx      = 500
+	dexScreenerAPI        = "https://api.dexscreener.com/tokens/v1/solana"
+	globalCooldownSeconds = 100
+	minLiquidity          = 40000.0
+	minMarketCap          = 26000.0
+	maxMarketCap          = 300000.0
+	min5mVolume           = 1000.0
+	min1hVolume           = 10000.0
+	min5mTx               = 100
+	min1hTx               = 500
 )
 
 type Pair struct {
@@ -104,10 +105,26 @@ type ValidationResult struct {
 
 var ErrRateLimited = errors.New("dexscreener rate limit exceeded")
 
+var (
+	cooldownMutex sync.RWMutex
+	coolDownUntil time.Time
+)
+
 func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 	const maxRetries = 3
 	baseRetryWait := 1 * time.Second
 	var lastErr error
+
+	cooldownMutex.RLock()
+	currentCoolDownUntil := coolDownUntil
+	cooldownMutex.RUnlock()
+
+	if !currentCoolDownUntil.IsZero() && time.Now().Before(currentCoolDownUntil) {
+		waitDuration := time.Until(currentCoolDownUntil)
+		log.Printf("INFO: DexScreener global cooldown active. Waiting for %v for token %s...", waitDuration.Round(time.Second), tokenCA)
+		time.Sleep(waitDuration)
+		log.Printf("INFO: DexScreener global cooldown finished for token %s. Proceeding.", tokenCA)
+	}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		waitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -127,7 +144,9 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 		if err != nil {
 			log.Printf("ERROR: DexScreener API GET request failed (Attempt %d) for %s: %v", attempt+1, tokenCA, err)
 			lastErr = fmt.Errorf("API request failed for %s: %w", tokenCA, err)
-			time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
+			if attempt < maxRetries-1 {
+				time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
+			}
 			continue
 		}
 
@@ -286,14 +305,15 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 			} else {
 				retryAfterSeconds = int(math.Pow(2, float64(attempt))) + 1
 			}
-
 			maxWait := 60
 			if retryAfterSeconds > maxWait {
 				retryAfterSeconds = maxWait
 			}
 
 			log.Printf("WARN: Rate limit hit (429) checking DexScreener for %s (Attempt %d). Retrying after %d seconds...", tokenCA, attempt+1, retryAfterSeconds)
-			time.Sleep(time.Duration(retryAfterSeconds) * time.Second)
+			if attempt < maxRetries-1 {
+				time.Sleep(time.Duration(retryAfterSeconds) * time.Second)
+			}
 			continue
 
 		} else if statusCode == http.StatusNotFound {
@@ -306,16 +326,32 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 			if readErr == nil && len(bodyBytes) > 0 {
 				bodyStr = string(bodyBytes)
 				errorMsg += fmt.Sprintf(". Body: %s", bodyStr)
-			} else if readErr != nil {
+			}
+			if readErr != nil {
 				errorMsg += fmt.Sprintf(". Failed to read response body: %v", readErr)
 			}
+
 			log.Printf("ERROR: DexScreener API non-OK status for %s (Attempt %d): %s", tokenCA, attempt+1, errorMsg)
 			lastErr = fmt.Errorf(errorMsg)
-			time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
+			if attempt < maxRetries-1 {
+				time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
+			}
 			continue
 		}
 	}
-
 	log.Printf("ERROR: Failed to get valid response from DexScreener for %s after %d attempts. Last error: %v", tokenCA, maxRetries, lastErr)
+
+	if errors.Is(lastErr, ErrRateLimited) {
+		cooldownMutex.Lock()
+		now := time.Now()
+		if coolDownUntil.IsZero() || now.After(coolDownUntil) {
+			coolDownUntil = now.Add(time.Duration(globalCooldownSeconds) * time.Second)
+			log.Printf("WARN: Persistent DexScreener rate limit hit for token %s. Activating global cooldown for %d seconds.", tokenCA, globalCooldownSeconds)
+		} else {
+			log.Printf("INFO: Persistent DexScreener rate limit hit for token %s, but global cooldown already active until %v.", tokenCA, coolDownUntil)
+		}
+		cooldownMutex.Unlock()
+	}
+
 	return nil, lastErr
 }
