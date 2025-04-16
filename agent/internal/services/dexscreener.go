@@ -1,12 +1,12 @@
 package services
 
 import (
+	"ca-scraper/shared/logger"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -14,8 +14,11 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
+
+var ErrRateLimited = errors.New("dexscreener rate limit exceeded")
 
 var dexScreenerLimiter = rate.NewLimiter(rate.Limit(4.66), 5)
 
@@ -29,6 +32,11 @@ const (
 	min1hVolume           = 10000.0
 	min5mTx               = 100
 	min1hTx               = 500
+)
+
+var (
+	cooldownMutex sync.RWMutex
+	coolDownUntil time.Time
 )
 
 type Pair struct {
@@ -103,17 +111,11 @@ type ValidationResult struct {
 	PairCreatedAtTimestamp int64
 }
 
-var ErrRateLimited = errors.New("dexscreener rate limit exceeded")
-
-var (
-	cooldownMutex sync.RWMutex
-	coolDownUntil time.Time
-)
-
-func IsTokenValid(tokenCA string) (*ValidationResult, error) {
+func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, error) {
 	const maxRetries = 3
 	baseRetryWait := 1 * time.Second
 	var lastErr error
+	tokenField := zap.String("tokenCA", tokenCA)
 
 	cooldownMutex.RLock()
 	currentCoolDownUntil := coolDownUntil
@@ -121,28 +123,31 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 
 	if !currentCoolDownUntil.IsZero() && time.Now().Before(currentCoolDownUntil) {
 		waitDuration := time.Until(currentCoolDownUntil)
-		log.Printf("INFO: DexScreener global cooldown active. Waiting for %v for token %s...", waitDuration.Round(time.Second), tokenCA)
+		appLogger.Info("DexScreener global cooldown active, waiting.",
+			zap.Duration("waitDuration", waitDuration.Round(time.Second)),
+			tokenField)
 		time.Sleep(waitDuration)
-		log.Printf("INFO: DexScreener global cooldown finished for token %s. Proceeding.", tokenCA)
+		appLogger.Info("DexScreener global cooldown finished, proceeding.", tokenField)
 	}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		attemptField := zap.Int("attempt", attempt+1)
 		waitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		err := dexScreenerLimiter.Wait(waitCtx)
 		cancel()
 		if err != nil {
-			log.Printf("ERROR: DexScreener internal rate limiter wait error for %s: %v", tokenCA, err)
+			appLogger.Error("DexScreener internal rate limiter wait error", tokenField, zap.Error(err))
 			return nil, fmt.Errorf("internal rate limiter error for %s: %w", tokenCA, err)
 		}
 
-		log.Printf("Attempt %d: Checking token validity on DexScreener: %s", attempt+1, tokenCA)
+		appLogger.Debug("Checking DexScreener validity", attemptField, tokenField)
 		url := fmt.Sprintf("%s/%s", dexScreenerAPI, tokenCA)
 		client := &http.Client{Timeout: 10 * time.Second}
 		req, _ := http.NewRequestWithContext(context.Background(), "GET", url, nil)
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("ERROR: DexScreener API GET request failed (Attempt %d) for %s: %v", attempt+1, tokenCA, err)
+			appLogger.Warn("DexScreener API GET request failed", attemptField, tokenField, zap.Error(err))
 			lastErr = fmt.Errorf("API request failed for %s: %w", tokenCA, err)
 			if attempt < maxRetries-1 {
 				time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
@@ -151,6 +156,7 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 		}
 
 		statusCode := resp.StatusCode
+		statusField := zap.Int("status", statusCode)
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
@@ -158,15 +164,16 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 			var responseData []Pair
 			err = json.Unmarshal(bodyBytes, &responseData)
 			if err != nil {
-				log.Printf("ERROR: DexScreener JSON Parsing Failed for %s: %v \nRaw Response: %s", tokenCA, err, string(bodyBytes))
+				appLogger.Error("DexScreener JSON Parsing Failed", tokenField, zap.Error(err), zap.ByteString("rawResponse", bodyBytes))
 				return nil, fmt.Errorf("JSON parsing failed for %s: %w", tokenCA, err)
 			}
 			if len(responseData) == 0 {
-				log.Printf("INFO: Token %s found but has no trading pairs on DexScreener.", tokenCA)
+				appLogger.Info("Token found but has no trading pairs on DexScreener.", tokenField)
 				return &ValidationResult{IsValid: false, FailReasons: []string{"No trading pairs found"}}, nil
 			}
 
 			pair := responseData[0]
+			pairField := zap.String("pairAddress", pair.PairAddress)
 			result := &ValidationResult{
 				PairAddress:            pair.PairAddress,
 				PairCreatedAtTimestamp: pair.PairCreatedAt,
@@ -177,7 +184,7 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 			if pair.Liquidity != nil {
 				result.LiquidityUSD = pair.Liquidity.Usd
 			} else {
-				log.Printf("Warning: Liquidity data missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
+				appLogger.Warn("Liquidity data missing, treating as 0.", tokenField, pairField)
 				result.LiquidityUSD = 0.0
 			}
 
@@ -188,7 +195,7 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 
 			volume5m, ok5mVol := pair.Volume["m5"]
 			if !ok5mVol {
-				log.Printf("Warning: Volume data for 'm5' missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
+				appLogger.Warn("Volume data missing", tokenField, pairField, zap.String("period", "m5"))
 				result.Volume5m = 0
 			} else {
 				result.Volume5m = volume5m
@@ -196,7 +203,7 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 
 			volume1h, ok1hVol := pair.Volume["h1"]
 			if !ok1hVol {
-				log.Printf("Warning: Volume data for 'h1' missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
+				appLogger.Warn("Volume data missing", tokenField, pairField, zap.String("period", "h1"))
 				result.Volume1h = 0
 			} else {
 				result.Volume1h = volume1h
@@ -205,14 +212,14 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 			if txData5m, ok := pair.Transactions["m5"]; ok {
 				result.Txns5m = txData5m.Buys + txData5m.Sells
 			} else {
-				log.Printf("Warning: Transaction data for 'm5' missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
+				appLogger.Warn("Transaction data missing", tokenField, pairField, zap.String("period", "m5"))
 				result.Txns5m = 0
 			}
 
 			if txData1h, ok := pair.Transactions["h1"]; ok {
 				result.Txns1h = txData1h.Buys + txData1h.Sells
 			} else {
-				log.Printf("Warning: Transaction data for 'h1' missing for token %s, pair %s. Treating as 0.", tokenCA, pair.PairAddress)
+				appLogger.Warn("Transaction data missing", tokenField, pairField, zap.String("period", "h1"))
 				result.Txns1h = 0
 			}
 
@@ -233,62 +240,59 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 				}
 			}
 
-			log.Printf("INFO: DexScreener Data fetched for %s (Pair: %s) - Liq: %.2f, MC: %.2f, Vol(5m): %.2f, Vol(1h): %.2f, Tx(5m): %d, Tx(1h): %d, Website: %s, Twitter: %s, Telegram: %s, Image: %s, CreatedAt: %d",
-				tokenCA, result.PairAddress, result.LiquidityUSD, result.MarketCap, result.Volume5m, result.Volume1h, result.Txns5m, result.Txns1h, result.WebsiteURL, result.TwitterURL, result.TelegramURL, result.ImageURL, result.PairCreatedAtTimestamp)
+			appLogger.Debug("DexScreener data fetched", tokenField, pairField,
+				zap.Float64("liqUSD", result.LiquidityUSD),
+				zap.Float64("mc", result.MarketCap),
+				zap.Float64("vol5m", result.Volume5m),
+				zap.Float64("vol1h", result.Volume1h),
+				zap.Int("tx5m", result.Txns5m),
+				zap.Int("tx1h", result.Txns1h),
+				zap.Bool("hasWebsite", result.WebsiteURL != ""),
+				zap.Bool("hasTwitter", result.TwitterURL != ""),
+				zap.Bool("hasTelegram", result.TelegramURL != ""),
+				zap.Bool("hasImage", result.ImageURL != ""),
+				zap.Int64("pairCreated", result.PairCreatedAtTimestamp),
+			)
 
 			meetsCriteria := true
 			failReasons := []string{}
 
 			if result.LiquidityUSD < minLiquidity {
 				meetsCriteria = false
-				reason := fmt.Sprintf("Liquidity %.2f < %.2f", result.LiquidityUSD, minLiquidity)
-				failReasons = append(failReasons, reason)
-				log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
+				failReasons = append(failReasons, fmt.Sprintf("Liquidity %.0f < %.0f", result.LiquidityUSD, minLiquidity))
 			}
 			if result.MarketCap < minMarketCap {
 				meetsCriteria = false
-				reason := fmt.Sprintf("MarketCap %.2f < %.2f", result.MarketCap, minMarketCap)
-				failReasons = append(failReasons, reason)
-				log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
+				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f < %.0f", result.MarketCap, minMarketCap))
 			}
 			if result.MarketCap > maxMarketCap {
 				meetsCriteria = false
-				reason := fmt.Sprintf("MarketCap %.2f > %.2f", result.MarketCap, maxMarketCap)
-				failReasons = append(failReasons, reason)
-				log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
+				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f > %.0f", result.MarketCap, maxMarketCap))
 			}
 			if result.Volume5m < min5mVolume {
 				meetsCriteria = false
-				reason := fmt.Sprintf("Vol(5m) %.2f < %.2f", result.Volume5m, min5mVolume)
-				failReasons = append(failReasons, reason)
-				log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
+				failReasons = append(failReasons, fmt.Sprintf("Vol(5m) %.0f < %.0f", result.Volume5m, min5mVolume))
 			}
 			if result.Volume1h < min1hVolume {
 				meetsCriteria = false
-				reason := fmt.Sprintf("Vol(1h) %.2f < %.2f", result.Volume1h, min1hVolume)
-				failReasons = append(failReasons, reason)
-				log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
+				failReasons = append(failReasons, fmt.Sprintf("Vol(1h) %.0f < %.0f", result.Volume1h, min1hVolume))
 			}
 			if result.Txns5m < min5mTx {
 				meetsCriteria = false
-				reason := fmt.Sprintf("Tx(5m) %d < %d", result.Txns5m, min5mTx)
-				failReasons = append(failReasons, reason)
-				log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
+				failReasons = append(failReasons, fmt.Sprintf("Tx(5m) %d < %d", result.Txns5m, min5mTx))
 			}
 			if result.Txns1h < min1hTx {
 				meetsCriteria = false
-				reason := fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx)
-				failReasons = append(failReasons, reason)
-				log.Printf("INFO: Criteria fail for %s: %s", tokenCA, reason)
+				failReasons = append(failReasons, fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx))
 			}
 
 			result.IsValid = meetsCriteria
 			result.FailReasons = failReasons
 
 			if meetsCriteria {
-				log.Printf("INFO: Token %s meets DexScreener criteria!", tokenCA)
+				appLogger.Debug("Token meets criteria", tokenField)
 			} else {
-				log.Printf("INFO: Token %s did not meet DexScreener criteria. Reasons: %s", tokenCA, strings.Join(failReasons, "; "))
+				appLogger.Debug("Token did not meet criteria", tokenField, zap.Strings("reasons", failReasons))
 			}
 
 			return result, nil
@@ -310,28 +314,22 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 				retryAfterSeconds = maxWait
 			}
 
-			log.Printf("WARN: Rate limit hit (429) checking DexScreener for %s (Attempt %d). Retrying after %d seconds...", tokenCA, attempt+1, retryAfterSeconds)
+			appLogger.Warn("DexScreener rate limit hit", attemptField, tokenField, statusField, zap.Int("retryAfter", retryAfterSeconds))
 			if attempt < maxRetries-1 {
 				time.Sleep(time.Duration(retryAfterSeconds) * time.Second)
 			}
 			continue
 
 		} else if statusCode == http.StatusNotFound {
-			log.Printf("INFO: Token %s not found on DexScreener (Status: 404).", tokenCA)
+			appLogger.Info("Token not found on DexScreener", tokenField, statusField)
 			return &ValidationResult{IsValid: false, FailReasons: []string{"Token not found on DexScreener"}}, nil
 
 		} else {
-			errorMsg := fmt.Sprintf("DexScreener API request failed for %s with status: %d", tokenCA, statusCode)
-			bodyStr := ""
-			if readErr == nil && len(bodyBytes) > 0 {
-				bodyStr = string(bodyBytes)
-				errorMsg += fmt.Sprintf(". Body: %s", bodyStr)
-			}
+			errorMsg := fmt.Sprintf("DexScreener API non-OK status: %d", statusCode)
 			if readErr != nil {
 				errorMsg += fmt.Sprintf(". Failed to read response body: %v", readErr)
 			}
-
-			log.Printf("ERROR: DexScreener API non-OK status for %s (Attempt %d): %s", tokenCA, attempt+1, errorMsg)
+			appLogger.Warn(errorMsg, attemptField, tokenField, statusField, zap.ByteString("body", bodyBytes))
 			lastErr = fmt.Errorf(errorMsg)
 			if attempt < maxRetries-1 {
 				time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
@@ -339,16 +337,26 @@ func IsTokenValid(tokenCA string) (*ValidationResult, error) {
 			continue
 		}
 	}
-	log.Printf("ERROR: Failed to get valid response from DexScreener for %s after %d attempts. Last error: %v", tokenCA, maxRetries, lastErr)
+
+	appLogger.Error("Failed to get valid DexScreener response after retries",
+		tokenField,
+		zap.Int("attempts", maxRetries),
+		zap.Error(lastErr))
 
 	if errors.Is(lastErr, ErrRateLimited) {
 		cooldownMutex.Lock()
 		now := time.Now()
-		if coolDownUntil.IsZero() || now.After(coolDownUntil) {
+		currentCoolDownEnd := coolDownUntil
+		if currentCoolDownEnd.IsZero() || now.After(currentCoolDownEnd) {
 			coolDownUntil = now.Add(time.Duration(globalCooldownSeconds) * time.Second)
-			log.Printf("WARN: Persistent DexScreener rate limit hit for token %s. Activating global cooldown for %d seconds.", tokenCA, globalCooldownSeconds)
+			appLogger.Warn("Persistent DexScreener rate limit hit. Activating global cooldown.",
+				tokenField,
+				zap.Int("cooldownSeconds", globalCooldownSeconds),
+				zap.Error(lastErr))
 		} else {
-			log.Printf("INFO: Persistent DexScreener rate limit hit for token %s, but global cooldown already active until %v.", tokenCA, coolDownUntil)
+			appLogger.Info("Persistent DexScreener rate limit hit, but global cooldown already active.",
+				tokenField,
+				zap.Time("coolDownUntil", currentCoolDownEnd))
 		}
 		cooldownMutex.Unlock()
 	}

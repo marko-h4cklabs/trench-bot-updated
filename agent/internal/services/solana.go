@@ -3,111 +3,149 @@ package services
 import (
 	"bytes"
 	"ca-scraper/shared/env"
+	"ca-scraper/shared/logger"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"time"
+
+	"go.uber.org/zap"
 )
 
-func FetchWithRetry(url string, payload []byte, maxRetries int) (*http.Response, error) {
+func FetchWithRetry(url string, payload []byte, maxRetries int, appLogger *logger.Logger) (*http.Response, error) {
 	var resp *http.Response
 	var err error
 	client := &http.Client{Timeout: 10 * time.Second}
+	urlField := zap.String("url", url)
+
 	for i := 0; i < maxRetries; i++ {
+		attemptField := zap.Int("attempt", i+1)
 		req, reqErr := http.NewRequest("POST", url, bytes.NewBuffer(payload))
 		if reqErr != nil {
+			appLogger.Error("HTTP request creation failed during fetch", urlField, zap.Error(reqErr))
 			return nil, fmt.Errorf("failed http request creation: %w", reqErr)
 		}
 		req.Header.Set("Content-Type", "application/json")
+
 		resp, err = client.Do(req)
-		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return resp, nil
-		}
-		if err != nil {
-			log.Printf("Retry %d/%d: Request failed for %s: %v", i+1, maxRetries, url, err)
-		} else {
-			log.Printf("Retry %d/%d: Request failed for %s with status: %s", i+1, maxRetries, url, resp.Status)
+
+		if err == nil {
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return resp, nil
+			}
+			statusField := zap.Int("statusCode", resp.StatusCode)
+			appLogger.Warn("Request failed with non-2xx status", urlField, statusField, attemptField, zap.Int("maxRetries", maxRetries))
 			resp.Body.Close()
+			err = fmt.Errorf("request failed with status: %s", resp.Status)
+
+		} else {
+			appLogger.Warn("HTTP request failed", urlField, attemptField, zap.Int("maxRetries", maxRetries), zap.Error(err))
+
 		}
-		backoff := time.Duration(math.Pow(2, float64(i))) * time.Second
-		time.Sleep(backoff)
+
+		if i < maxRetries-1 {
+			backoff := time.Duration(math.Pow(2, float64(i))) * time.Second
+			appLogger.Info("Retrying request", urlField, attemptField, zap.Duration("backoff", backoff))
+			time.Sleep(backoff)
+		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("Helius RPC request failed after %d retries: %w", maxRetries, err)
-	} else if resp != nil {
-		return nil, fmt.Errorf("Helius RPC request failed after %d retries with status: %s", maxRetries, resp.Status)
-	} else {
-		return nil, fmt.Errorf("Helius RPC request failed after %d retries for unknown reasons", maxRetries)
-	}
+	return nil, fmt.Errorf("Helius RPC request failed after %d retries for %s: %w", maxRetries, url, err)
 }
 
-func HeliusRPCRequest(method string, params interface{}) (map[string]interface{}, error) {
+func HeliusRPCRequest(method string, params interface{}, appLogger *logger.Logger) (map[string]interface{}, error) {
+	methodField := zap.String("method", method)
 	apiKey := env.HeliusAPIKey
 	if apiKey == "" {
-		return nil, fmt.Errorf(" Missing HELIUS_API_KEY from env configuration")
+		appLogger.Error("HELIUS_API_KEY missing, cannot make RPC request", methodField)
+		return nil, fmt.Errorf("missing HELIUS_API_KEY from env configuration")
 	}
 	url := fmt.Sprintf("https://mainnet.helius-rpc.com/?api-key=%s", apiKey)
+	urlField := zap.String("url", url)
+
 	payload := map[string]interface{}{"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf(" Failed to marshal Helius RPC payload: %w", err)
+		appLogger.Error("Failed to marshal Helius RPC payload", methodField, zap.Error(err))
+		return nil, fmt.Errorf("failed to marshal Helius RPC payload: %w", err)
 	}
-	resp, err := FetchWithRetry(url, payloadBytes, 3)
+
+	resp, err := FetchWithRetry(url, payloadBytes, 3, appLogger)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
 	var result map[string]interface{}
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&result); decodeErr != nil {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("Raw Helius Response Body on Decode Error: %s", string(bodyBytes))
-		return nil, fmt.Errorf(" Failed to parse Helius response JSON: %w", decodeErr)
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		appLogger.Error("Failed to read Helius response body", methodField, urlField, zap.Int("status", resp.StatusCode), zap.Error(readErr))
+		return nil, fmt.Errorf("failed to read Helius response body: %w", readErr)
 	}
+
+	if decodeErr := json.Unmarshal(bodyBytes, &result); decodeErr != nil {
+		appLogger.Error("Failed to parse Helius response JSON", methodField, urlField, zap.Int("status", resp.StatusCode), zap.Error(decodeErr), zap.ByteString("rawBody", bodyBytes))
+		return nil, fmt.Errorf("failed to parse Helius response JSON: %w", decodeErr)
+	}
+
 	if errorData, exists := result["error"]; exists {
-		if errorMap, ok := errorData.(map[string]interface{}); ok {
-			return nil, fmt.Errorf(" Helius API Error: Code=%v, Message=%v", errorMap["code"], errorMap["message"])
+		errMap, ok := errorData.(map[string]interface{})
+		var apiErr error
+		if ok {
+			apiErr = fmt.Errorf("Helius API Error: Code=%v, Message=%v", errMap["code"], errMap["message"])
+		} else {
+			apiErr = fmt.Errorf("Helius API Error: %v", errorData)
 		}
-		return nil, fmt.Errorf(" Helius API Error: %v", errorData)
+		appLogger.Warn("Helius API returned an error", methodField, urlField, zap.Any("errorDetail", errorData))
+		return nil, apiErr
 	}
+
 	if _, hasResult := result["result"]; !hasResult {
-		log.Printf("Warning: Helius response missing 'result' field. Full Response: %v", result)
+		appLogger.Debug("Helius response missing 'result' field", methodField, urlField, zap.Any("fullResponse", result))
 	}
+
 	return result, nil
 }
 
-func InitializeSolana() {
-	log.Println(" Solana Service Configuration Initialized (API Key loaded via env package).")
+func InitializeSolana(appLogger *logger.Logger) {
+	appLogger.Info("Solana Service Configuration Initialized (using Helius RPC)")
 }
 
-func CheckExistingHeliusWebhook(webhookURL string) (bool, error) {
+func CheckExistingHeliusWebhook(webhookURL string, appLogger *logger.Logger) (bool, error) {
+	urlField := zap.String("webhookURL", webhookURL)
 	apiKey := env.HeliusAPIKey
 	if apiKey == "" {
-		return false, fmt.Errorf("HELIUS_API_KEY missing from env package, cannot check webhooks")
+		appLogger.Error("HELIUS_API_KEY missing, cannot check webhooks", urlField)
+		return false, fmt.Errorf("HELIUS_API_KEY missing")
 	}
 
 	url := fmt.Sprintf("https://api.helius.xyz/v0/webhooks?api-key=%s", apiKey)
 	client := &http.Client{Timeout: 15 * time.Second}
+
+	appLogger.Debug("Sending GET request to check webhooks", zap.String("targetURL", url))
 	resp, err := client.Get(url)
 	if err != nil {
-		log.Printf("Error getting webhooks from Helius: %v", err)
+		appLogger.Error("Error getting webhooks from Helius", urlField, zap.Error(err))
 		return false, err
 	}
 	defer resp.Body.Close()
 
+	statusField := zap.Int("statusCode", resp.StatusCode)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("Failed to get webhooks from Helius. Status: %d, Body: %s", resp.StatusCode, string(body))
-
-		return false, fmt.Errorf("failed to get webhooks from Helius: status %d, response body: %s", resp.StatusCode, string(body))
-
+		body, readErr := io.ReadAll(resp.Body)
+		bodyField := zap.Skip()
+		if readErr == nil {
+			bodyField = zap.ByteString("responseBody", body)
+		}
+		appLogger.Error("Failed to get webhooks from Helius API", urlField, statusField, bodyField, zap.NamedError("readError", readErr))
+		return false, fmt.Errorf("failed to get webhooks from Helius: status %d", resp.StatusCode)
 	}
 
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		log.Printf("Error reading Helius webhook list response body: %v", readErr)
+		appLogger.Error("Error reading Helius webhook list response body", urlField, statusField, zap.Error(readErr))
 		return false, readErr
 	}
 
@@ -118,22 +156,21 @@ func CheckExistingHeliusWebhook(webhookURL string) (bool, error) {
 	var webhooks []HeliusWebhook
 
 	if err := json.Unmarshal(body, &webhooks); err != nil {
-		log.Printf("Error unmarshalling Helius webhook list response: %v", err)
-		log.Printf("Response Body: %s", string(body))
+		appLogger.Error("Error unmarshalling Helius webhook list response", urlField, zap.Error(err), zap.ByteString("rawBody", body))
 		return false, err
 	}
 
 	found := false
 	for _, webhook := range webhooks {
 		if webhook.WebhookURL == webhookURL {
-			log.Printf("Found existing webhook matching URL: %s (ID: %s)", webhookURL, webhook.WebhookID)
+			appLogger.Info("Found existing webhook matching URL", urlField, zap.String("webhookID", webhook.WebhookID))
 			found = true
 			break
 		}
 	}
 
 	if !found {
-		log.Printf("No existing Helius webhook found matching URL: %s", webhookURL)
+		appLogger.Info("No existing Helius webhook found matching URL", urlField)
 	}
 	return found, nil
 }

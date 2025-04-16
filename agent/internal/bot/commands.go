@@ -3,152 +3,215 @@ package bot
 import (
 	"ca-scraper/agent/database"
 	"ca-scraper/agent/internal/models"
+	"ca-scraper/shared/notifications"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
-
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"go.uber.org/zap"
 )
 
-func HandleCommand(update tgbotapi.Update) {
-	command := update.Message.Command()
-	args := update.Message.CommandArguments()
+func getThreadIDFromUpdate(update tgbotapi.Update) int {
+	threadID := 0
 
-	if appLogger == nil {
-		log.Printf("ERROR: appLogger not initialized in bot package when handling command '%s'", command)
-		return
+	if update.Message != nil && update.Message.ReplyToMessage != nil {
+		replyJSON, err := json.Marshal(update.Message.ReplyToMessage)
+		if err == nil {
+			var replyMap map[string]interface{}
+			if json.Unmarshal(replyJSON, &replyMap) == nil {
+				if threadIDVal, ok := replyMap["message_thread_id"]; ok {
+					if tidFloat, ok := threadIDVal.(float64); ok {
+						threadID = int(tidFloat)
+						if threadID != 0 {
+							return threadID
+						}
+					}
+				}
+			}
+		}
 	}
 
-	appLogger.Info("Processing command",
-		zap.String("command", command),
-		zap.String("args", args),
-		zap.Int64("ChatID", update.Message.Chat.ID),
-		zap.String("User", update.Message.From.UserName),
+	if update.Message != nil {
+		messageJSON, err := json.Marshal(update.Message)
+		if err == nil {
+			var messageMap map[string]interface{}
+			if json.Unmarshal(messageJSON, &messageMap) == nil {
+				isTopic := false
+				if isTopicVal, ok := messageMap["is_topic_message"]; ok {
+					if isTopicBool, ok := isTopicVal.(bool); ok {
+						isTopic = isTopicBool
+					}
+				}
+
+				if threadIDVal, ok := messageMap["message_thread_id"]; ok {
+					if tidFloat, ok := threadIDVal.(float64); ok {
+						threadID = int(tidFloat)
+						if threadID != 0 {
+							return threadID
+						}
+					}
+				}
+
+				if isTopic && threadID == 0 {
+					if msgIDVal, ok := messageMap["message_id"]; ok {
+						if msgIDFloat, ok := msgIDVal.(float64); ok {
+							threadID = int(msgIDFloat)
+							return threadID
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return threadID
+}
+
+func HandleCommand(update tgbotapi.Update, command, args string) {
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
+
+	threadID := getThreadIDFromUpdate(update)
+
+	if appLogger == nil {
+		log.Println("ERROR: appLogger is nil in HandleCommand")
+		return
+	}
+	appLogger.Zap().Infow("Processing command",
+		"command", command,
+		"args", args,
+		"chatID", chatID,
+		"determinedThreadID", threadID,
+		"user", update.Message.From.UserName,
+		"userID", update.Message.From.ID,
 	)
 
 	switch command {
 	case "whitelist":
-		handleWhitelistCommand(update, args)
+		handleWhitelistCommand(chatID, threadID, args)
 	case "walletupdate":
-		handleWalletUpdateCommand(update, args)
+		handleWalletUpdateCommand(chatID, threadID, args)
 	case "walletdelete":
-		handleWalletDeleteCommand(update, args)
+		handleWalletDeleteCommand(chatID, threadID, args)
 	case "start", "help":
-		handleHelpCommand(update)
+		handleHelpCommand(chatID, threadID)
 	default:
-		appLogger.Warn("Unknown command received", zap.String("command", command))
-		SendReply(update.Message.Chat.ID, fmt.Sprintf(" Unknown command: /%s", command))
+		appLogger.Zap().Warnw("Unknown command received", "command", command, "chatID", chatID, "threadID", threadID)
+		SendReply(chatID, threadID, fmt.Sprintf("Unknown command: /%s", notifications.EscapeMarkdownV2(command)))
 	}
 }
 
-func handleWhitelistCommand(update tgbotapi.Update, args string) {
+func handleWhitelistCommand(chatID int64, threadID int, args string) {
 	wallet := strings.TrimSpace(args)
 	if wallet == "" {
-		SendReply(update.Message.Chat.ID, "Usage: /whitelist {wallet-address}")
-		appLogger.Warn("Whitelist command failed: no wallet address provided")
+		SendReply(chatID, threadID, "Usage: `/whitelist {wallet\\-address}`")
 		return
 	}
-
 	var user models.User
 	result := database.DB.Where("wallet_id = ?", wallet).First(&user)
-	if result.RowsAffected > 0 {
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` is already whitelisted!", wallet))
-		appLogger.Info("Whitelist command failed: wallet already whitelisted", zap.String("wallet", wallet))
+	if result.Error != nil && result.Error.Error() != "record not found" {
+		SendReply(chatID, threadID, "Database error checking wallet.")
 		return
 	}
-
+	if result.RowsAffected > 0 {
+		SendReply(chatID, threadID, fmt.Sprintf("Wallet `%s` is already whitelisted\\!", notifications.EscapeMarkdownV2(wallet)))
+		return
+	}
 	newUser := models.User{WalletID: wallet, NFTStatus: false}
 	if err := database.DB.Create(&newUser).Error; err != nil {
-		SendReply(update.Message.Chat.ID, "An error occurred while whitelisting the wallet.")
-		appLogger.Error("Whitelist command failed: error adding wallet to DB", zap.String("wallet", wallet), zap.Error(err))
+		SendReply(chatID, threadID, "Error adding wallet to whitelist.")
 		return
 	}
-
-	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` has been whitelisted!", wallet))
-	appLogger.Info("Wallet successfully whitelisted", zap.String("wallet", wallet))
+	SendReply(chatID, threadID, fmt.Sprintf("Wallet `%s` has been whitelisted\\!", notifications.EscapeMarkdownV2(wallet)))
 }
 
-func handleWalletUpdateCommand(update tgbotapi.Update, args string) {
+func handleWalletUpdateCommand(chatID int64, threadID int, args string) {
 	parts := strings.Fields(args)
 	if len(parts) != 2 {
-		SendReply(update.Message.Chat.ID, "Usage: /walletupdate {current-wallet-address} {new-wallet-address}")
+		SendReply(chatID, threadID, "Usage: `/walletupdate {current-wallet} {new-wallet}`")
 		return
 	}
-
-	currentWallet := parts[0]
-	updatedWallet := parts[1]
+	currWallet := parts[0]
+	newWallet := parts[1]
 
 	var user models.User
-	result := database.DB.Where("wallet_id = ?", currentWallet).First(&user)
-	if result.RowsAffected == 0 {
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` is not in the whitelist.", currentWallet))
-		appLogger.Warn("Wallet update failed: current wallet not found", zap.String("currentWallet", currentWallet))
+	result := database.DB.Where("wallet_id = ?", currWallet).First(&user)
+	if result.Error != nil || result.RowsAffected == 0 {
+		SendReply(chatID, threadID, "Current wallet not found or database error.")
 		return
 	}
 
-	user.WalletID = updatedWallet
+	var check models.User
+	if err := database.DB.Where("wallet_id = ?", newWallet).First(&check).Error; err == nil && check.ID != user.ID {
+		SendReply(chatID, threadID, "New wallet is already used.")
+		return
+	}
+
+	user.WalletID = newWallet
 	if err := database.DB.Save(&user).Error; err != nil {
-		appLogger.Error("Wallet update failed: error saving updated wallet", zap.String("currentWallet", currentWallet), zap.String("newWallet", updatedWallet), zap.Error(err))
-		SendReply(update.Message.Chat.ID, " An error occurred while updating the wallet.")
+		SendReply(chatID, threadID, "Error updating wallet.")
 		return
 	}
-
-	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` has been updated to `%s`!", currentWallet, updatedWallet))
-	appLogger.Info("Wallet successfully updated", zap.String("currentWallet", currentWallet), zap.String("newWallet", updatedWallet))
+	SendReply(chatID, threadID, fmt.Sprintf("Wallet `%s` updated to `%s`\\!", notifications.EscapeMarkdownV2(currWallet), notifications.EscapeMarkdownV2(newWallet)))
 }
 
-func handleWalletDeleteCommand(update tgbotapi.Update, args string) {
+func handleWalletDeleteCommand(chatID int64, threadID int, args string) {
 	wallet := strings.TrimSpace(args)
 	if wallet == "" {
-		SendReply(update.Message.Chat.ID, " Usage: /walletdelete {wallet-address}")
+		SendReply(chatID, threadID, "Usage: `/walletdelete {wallet}`")
 		return
 	}
-
 	result := database.DB.Where("wallet_id = ?", wallet).Delete(&models.User{})
 	if result.Error != nil {
-		appLogger.Error("Wallet delete failed: error deleting wallet", zap.String("wallet", wallet), zap.Error(result.Error))
-		SendReply(update.Message.Chat.ID, "An error occurred while deleting the wallet.")
+		SendReply(chatID, threadID, "Error deleting wallet.")
 		return
 	}
-
 	if result.RowsAffected == 0 {
-		SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` is not in the whitelist.", wallet))
-		appLogger.Warn("Wallet delete failed: wallet not found", zap.String("wallet", wallet))
+		SendReply(chatID, threadID, "Wallet not found.")
+		return
+	}
+	SendReply(chatID, threadID, fmt.Sprintf("Wallet `%s` removed.`", notifications.EscapeMarkdownV2(wallet)))
+}
+
+func handleHelpCommand(chatID int64, threadID int) {
+	helpText := `*Available commands:*
+/whitelist {wallet} - Add wallet to whitelist
+/walletupdate {current} {new} - Update wallet
+/walletdelete {wallet} - Remove wallet
+/help - Show this help`
+	SendReply(chatID, threadID, helpText)
+}
+
+func SendReply(chatID int64, threadID int, text string) {
+	theBot := notifications.GetBotInstance()
+	if theBot == nil {
+		log.Println("ERROR: Cannot send reply, bot instance (tgbotapi) is nil.")
 		return
 	}
 
-	SendReply(update.Message.Chat.ID, fmt.Sprintf("Wallet `%s` has been removed from the whitelist!", wallet))
-	appLogger.Info("Wallet successfully deleted", zap.String("wallet", wallet))
-}
-
-func handleHelpCommand(update tgbotapi.Update) {
-	helpText := `Available commands:
-/whitelist {wallet} - Add wallet to whitelist.
-/walletupdate {current} {new} - Update whitelisted wallet.
-/walletdelete {wallet} - Remove wallet from whitelist.
-/checkwallet {wallet} - Check if wallet holds Trench Demon NFT.
-/help - Show this help message.`
-	SendReply(update.Message.Chat.ID, helpText)
-}
-
-func SendReply(chatID int64, text string) {
-	if bot == nil {
-		log.Println("ERROR: Cannot send reply, bot is not initialized.")
-		if appLogger != nil {
-			appLogger.Error("Cannot send reply, bot is not initialized.")
-		}
-		return
+	params := make(map[string]string)
+	params["chat_id"] = fmt.Sprintf("%d", chatID)
+	params["text"] = text
+	params["parse_mode"] = tgbotapi.ModeMarkdownV2
+	if threadID != 0 {
+		params["message_thread_id"] = fmt.Sprintf("%d", threadID)
 	}
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeMarkdown
 
-	if _, err := bot.Send(msg); err != nil {
+	_, err := theBot.MakeRequest("sendMessage", params)
+	if err != nil {
 		if appLogger != nil {
-			appLogger.Error("Failed to send reply message", zap.Error(err), zap.Int64("chatID", chatID))
+			logArgs := []interface{}{"chatID", chatID, "threadID", threadID, "error", err}
+			var tgErr *tgbotapi.Error
+			if errors.As(err, &tgErr) {
+				logArgs = append(logArgs, "apiErrorCode", tgErr.Code, "apiErrorDesc", tgErr.Message)
+			}
+			appLogger.Zap().Errorw("Failed to send reply via MakeRequest", logArgs...)
 		} else {
-			log.Printf("ERROR: Failed to send reply: %v", err)
+			log.Printf("ERROR: Failed to send tgbotapi reply via MakeRequest to chat %d (thread %d): %v", chatID, threadID, err)
 		}
 	}
 }

@@ -1,187 +1,167 @@
-// File: shared/logger/logger.go
 package logger
 
 import (
-	"fmt"
-	"os"
-	"strconv"
-
-	// Assuming SendTelegramMessage is in the notifications package
 	"ca-scraper/shared/notifications"
+	"fmt"
+	"log"
+	"strings"
+	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
-// Logger struct manages logging with Zap and Telegram
-type Logger struct {
-	ZapLogger           *zap.SugaredLogger
-	BotToken            string // Still needed if notifications package requires it implicitly or for other uses
-	GroupID             int64
-	SystemLogsID        int // Thread ID for general system logs
-	ScannerLogsThreadID int // Thread ID for specific scanner logs (Raydium)
+type Config struct {
+	Environment         string
 	EnableTelegram      bool
+	SystemLogsThreadID  int
+	ScannerLogsThreadID int
 }
 
-// NewLogger initializes the logger (assuming previous implementation is okay)
-func NewLogger(environment string, enableTelegram bool) (*Logger, error) {
+type Logger struct {
+	ZapLogger           *zap.SugaredLogger
+	enableTelegram      bool
+	systemLogsThreadID  int
+	scannerLogsThreadID int
+}
+
+func NewLogger(cfg Config) (*Logger, error) {
 	var zapCoreLogger *zap.Logger
 	var err error
-	if environment == "production" {
-		zapCoreLogger, err = zap.NewProduction()
+	var zapCfg zap.Config
+
+	if cfg.Environment == "production" {
+		zapCfg = zap.NewProductionConfig()
+		zapCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	} else {
-		zapCoreLogger, err = zap.NewDevelopment(zap.AddCallerSkip(1)) // Add CallerSkip for accurate line numbers in logs
+		zapCfg = zap.NewDevelopmentConfig()
+		zapCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	}
+	zapCfg.DisableCaller = false
+
+	if cfg.Environment == "production" {
+		zapCfg.Development = false
+		zapCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+		zapCfg.DisableStacktrace = false
+	} else {
+		zapCfg.Development = true
+		zapCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+		zapCfg.DisableStacktrace = true
+	}
+
+	zapCoreLogger, err = zapCfg.Build(zap.AddCallerSkip(1))
 	if err != nil {
+		log.Printf("FATAL: Failed to initialize zap logger: %v\n", err)
 		return nil, fmt.Errorf("failed to initialize zap logger: %w", err)
 	}
 	zapSugaredLogger := zapCoreLogger.Sugar()
 
-	var botToken string
-	var groupID int64
-	var systemLogsID, scannerLogsThreadID int = 0, 0
-
-	if enableTelegram {
-		botToken = os.Getenv("TELEGRAM_BOT_TOKEN")
-		groupIDStr := os.Getenv("TELEGRAM_GROUP_ID")
-		systemLogsIDStr := os.Getenv("SYSTEM_LOGS_THREAD_ID")
-		scannerLogsThreadIDStr := os.Getenv("SCANNER_LOGS_THREAD_ID")
-
-		if botToken == "" {
-			zapSugaredLogger.Warn("TELEGRAM_BOT_TOKEN missing, disabling Telegram logging.")
-			enableTelegram = false
-		} else if groupIDStr == "" {
-			zapSugaredLogger.Warn("TELEGRAM_GROUP_ID missing, disabling Telegram logging.")
-			enableTelegram = false
-		} else {
-			groupID, err = strconv.ParseInt(groupIDStr, 10, 64)
-			if err != nil {
-				zapSugaredLogger.Errorf("Failed to parse TELEGRAM_GROUP_ID '%s', disabling Telegram logging: %v", groupIDStr, err)
-				enableTelegram = false
-			}
-
-			if systemLogsIDStr != "" {
-				systemLogsID, err = strconv.Atoi(systemLogsIDStr)
-				if err != nil {
-					zapSugaredLogger.Warnf("Failed to parse SYSTEM_LOGS_THREAD_ID '%s', using default (0): %v", systemLogsIDStr, err)
-					systemLogsID = 0
-				}
-			} else {
-				zapSugaredLogger.Info("SYSTEM_LOGS_THREAD_ID not set, using default (0 - main group).")
-			}
-
-			if scannerLogsThreadIDStr != "" {
-				scannerLogsThreadID, err = strconv.Atoi(scannerLogsThreadIDStr)
-				if err != nil {
-					zapSugaredLogger.Warnf("Failed to parse SCANNER_LOGS_THREAD_ID '%s', using default (0): %v", scannerLogsThreadIDStr, err)
-					scannerLogsThreadID = 0
-				}
-			} else {
-				zapSugaredLogger.Info("SCANNER_LOGS_THREAD_ID not set, using default (0 - main group).")
-			}
-		}
+	if cfg.EnableTelegram {
+		zapSugaredLogger.Infof("Logger initialized. Telegram logging integration ENABLED (System Thread: %d, Scanner Thread: %d)",
+			cfg.SystemLogsThreadID, cfg.ScannerLogsThreadID)
+	} else {
+		zapSugaredLogger.Info("Logger initialized. Telegram logging integration DISABLED.")
 	}
 
 	return &Logger{
 		ZapLogger:           zapSugaredLogger,
-		BotToken:            botToken, // Keep storing it
-		GroupID:             groupID,
-		SystemLogsID:        systemLogsID,
-		ScannerLogsThreadID: scannerLogsThreadID,
-		EnableTelegram:      enableTelegram,
+		enableTelegram:      cfg.EnableTelegram,
+		systemLogsThreadID:  cfg.SystemLogsThreadID,
+		scannerLogsThreadID: cfg.ScannerLogsThreadID,
 	}, nil
 }
 
-// logToTelegramInternal sends a log message string to Telegram.
-// NOTE: This assumes notifications.SendTelegramMessage handles target chat/thread implicitly
-//
-//	based on how notifications.InitTelegramBot() was configured, OR that it only sends
-//	to one predefined place. It also assumes it handles errors internally.
-func (l *Logger) logToTelegramInternal(message string /* removed threadID */) {
-	if !l.EnableTelegram {
-		return
+func formatKeyValuesSimple(keysAndValues ...interface{}) string {
+	if len(keysAndValues) == 0 {
+		return ""
 	}
-	// Directly call the function with just the message string
-	// We assume this function knows the bot token and chat ID from initialization
-	notifications.SendTelegramMessage(message)
-	// Since it doesn't return an error, we can't check for success here.
-	// The notifications package itself should log errors if sending fails.
+	var sb strings.Builder
+	sb.WriteString(" |")
+	for i := 0; i < len(keysAndValues); i += 2 {
+		keyStr := fmt.Sprintf("%v", keysAndValues[i])
+		valStr := "MISSING_VALUE"
+		if i+1 < len(keysAndValues) {
+			if err, ok := keysAndValues[i+1].(error); ok {
+				valStr = err.Error()
+			} else {
+				valStr = fmt.Sprintf("%v", keysAndValues[i+1])
+			}
+		}
+		sb.WriteString(fmt.Sprintf(" %s=`%s`", keyStr, notifications.EscapeMarkdownV2(valStr)))
+	}
+	return sb.String()
 }
-
-// LogToSystemLogs sends logs specifically to the System Logs destination (via internal func)
-func (l *Logger) LogToSystemLogs(message string) {
-	// If you need separate threads and SendTelegramMessage doesn't support it,
-	// you might need a different approach or modify the notifications package.
-	// For now, we send the same way regardless of logical destination.
-	l.logToTelegramInternal(message)
-}
-
-// LogToRaydiumTracker sends logs specifically to the Scanner Logs destination (via internal func)
-func (l *Logger) LogToRaydiumTracker(message string) {
-	// Sending the same way as system logs for now.
-	l.logToTelegramInternal(message)
-}
-
-// --- Corrected Logging Methods ---
 
 func (l *Logger) Info(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Infow(msg, keysAndValues...)
-	// Decide if you want Info logs in Telegram
-	// l.LogToSystemLogs(msg) // Example: Send only base message string
 }
 
 func (l *Logger) Warn(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Warnw(msg, keysAndValues...)
-	// Format a simple string for Telegram
-	formattedMsg := fmt.Sprintf(" WARN: %s", msg)
-	// Add fields to the string if needed for context
-	// (This part can get complex, keep it simple for now)
-	// for i := 0; i < len(keysAndValues); i+=2 { ... }
-	l.LogToSystemLogs(formattedMsg)
+	if l.enableTelegram {
+		formattedMsg := fmt.Sprintf(" *WARN:* %s%s", notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+		notifications.SendSystemLogMessage(formattedMsg)
+	}
 }
 
 func (l *Logger) Error(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Errorw(msg, keysAndValues...)
-	// Format a simple string for Telegram, attempting to include the error text
-	errMsgText := ""
-	for i := 0; i < len(keysAndValues); i += 2 {
-		// Check if the value is an error type
-		if err, ok := keysAndValues[i+1].(error); ok {
-			errMsgText = err.Error() // Get the error string
-			break                    // Take the first error found
-		}
+	if l.enableTelegram {
+		formattedMsg := fmt.Sprintf("‼ *ERROR:* %s%s", notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+		notifications.SendSystemLogMessage(formattedMsg)
 	}
-	formattedMsg := fmt.Sprintf(" ERROR: %s", msg)
-	if errMsgText != "" {
-		formattedMsg = fmt.Sprintf("%s | Details: %s", formattedMsg, errMsgText)
-	}
-	l.LogToSystemLogs(formattedMsg)
 }
 
 func (l *Logger) Debug(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Debugw(msg, keysAndValues...)
-	// Debug logs usually don't go to Telegram
 }
 
 func (l *Logger) Fatal(msg string, keysAndValues ...interface{}) {
-	l.ZapLogger.Fatalw(msg, keysAndValues...) // Use Fatalw for structured key-value pairs
-
-	errMsgText := ""
-	for i := 0; i < len(keysAndValues); i += 2 {
-		if err, ok := keysAndValues[i+1].(error); ok {
-			errMsgText = err.Error()
-			break
-		}
+	if l.enableTelegram {
+		formattedMsg := fmt.Sprintf(" *FATAL:* %s%s", notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+		notifications.SendSystemLogMessage(formattedMsg)
+		time.Sleep(1 * time.Second)
 	}
-	formattedMsg := fmt.Sprintf(" FATAL: %s", msg)
-	if errMsgText != "" {
-		formattedMsg = fmt.Sprintf("%s | Details: %s", formattedMsg, errMsgText)
-	}
-	// Attempt to send to Telegram before Zap exits (best effort)
-	l.logToTelegramInternal(formattedMsg)
-	// Zap's Fatalw calls os.Exit(1) after logging internally
+	l.ZapLogger.Fatalw(msg, keysAndValues...)
 }
 
-// ExposeZapLogger allows direct access to the underlying zap.SugaredLogger if needed.
-func (l *Logger) ExposeZapLogger() *zap.SugaredLogger {
+func (l *Logger) LogToScanner(level zapcore.Level, msg string, keysAndValues ...interface{}) {
+	zapFunc := l.ZapLogger.Infow
+	switch level {
+	case zapcore.DebugLevel:
+		zapFunc = l.ZapLogger.Debugw
+	case zapcore.WarnLevel:
+		zapFunc = l.ZapLogger.Warnw
+	case zapcore.ErrorLevel:
+		zapFunc = l.ZapLogger.Errorw
+	case zapcore.FatalLevel:
+		zapFunc = l.ZapLogger.Fatalw
+	}
+
+	zapFunc(msg, keysAndValues...)
+
+	if l.enableTelegram && l.scannerLogsThreadID != 0 && level >= zapcore.InfoLevel {
+		prefix := "[Scanner] "
+		switch level {
+		case zapcore.InfoLevel:
+			prefix += "ℹ INFO: "
+		case zapcore.WarnLevel:
+			prefix += " *WARN:* "
+		case zapcore.ErrorLevel:
+			prefix += "‼ *ERROR:* "
+		case zapcore.FatalLevel:
+			prefix += " *FATAL:* "
+			formattedMsg := fmt.Sprintf("%s%s%s", prefix, notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+			notifications.SendScannerLogMessage(formattedMsg)
+			time.Sleep(1 * time.Second)
+			return
+		}
+
+		formattedMsg := fmt.Sprintf("%s%s%s", prefix, notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+		notifications.SendScannerLogMessage(formattedMsg)
+	}
+}
+
+func (l *Logger) Zap() *zap.SugaredLogger {
 	return l.ZapLogger
 }

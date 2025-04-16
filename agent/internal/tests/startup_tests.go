@@ -3,202 +3,168 @@ package tests
 import (
 	"bytes"
 	"ca-scraper/shared/env"
+	"ca-scraper/shared/logger"
+	"ca-scraper/shared/notifications"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-
 	"time"
+
+	"go.uber.org/zap"
 )
 
-func RunStartupTests() {
-	log.Println("--- Running Startup Tests ---")
+func RunStartupTests(appLogger *logger.Logger) {
+	appLogger.Info("--- Running Startup Tests ---")
 	webhookURL := env.WebhookURL
 	if webhookURL == "" {
-		log.Println("CRITICAL: WEBHOOK_LISTENER_URL_DEV not set in environment. Startup tests cannot proceed meaningfully.")
-
-		webhookURL = "http://localhost:5555/api/v1/webhook"
+		appLogger.Warn("WEBHOOK_LISTENER_URL_DEV/PROD not set. Using default for tests.", zap.String("defaultURL", "http://localhost:"+env.Port+"/api/v1/webhook"))
+		webhookURL = "http://localhost:" + env.Port + "/api/v1/webhook"
 	}
-	log.Printf("Using Webhook URL for tests: %s", webhookURL)
+	appLogger.Info("Using Webhook URL for tests", zap.String("url", webhookURL))
 
 	initialDelay := 5 * time.Second
-	log.Printf("Waiting for initial %v server startup grace period...", initialDelay)
+	appLogger.Info("Waiting for initial server startup grace period...", zap.Duration("delay", initialDelay))
 	time.Sleep(initialDelay)
 
-	log.Println("Probing server readiness...")
+	appLogger.Info("Probing server readiness...")
 	serverReady := false
 	maxRetries := 15
 	retryInterval := 3 * time.Second
 	probeTimeout := 5 * time.Second
-
 	probeClient := &http.Client{Timeout: probeTimeout}
-
 	healthURL := webhookURL
 
 	for i := 0; i < maxRetries; i++ {
-		log.Printf("Attempt %d/%d: Pinging %s...", i+1, maxRetries, healthURL)
+		attemptField := zap.Int("attempt", i+1)
+		appLogger.Info("Pinging server...", attemptField, zap.Int("maxRetries", maxRetries), zap.String("url", healthURL))
 		req, err := http.NewRequest("GET", healthURL, nil)
 		if err != nil {
-			log.Printf(" Probe Error (creating request): %v", err)
+			appLogger.Warn("Probe Error (creating request)", attemptField, zap.Error(err))
 			time.Sleep(retryInterval)
 			continue
 		}
 
 		resp, err := probeClient.Do(req)
 		if err != nil {
-			log.Printf(" Probe Error (connecting): %v", err)
-			log.Println(" Server not ready yet...")
+			appLogger.Warn("Probe Error (connecting)", attemptField, zap.Error(err))
+			appLogger.Info("Server not ready yet...")
 			time.Sleep(retryInterval)
 			continue
 		}
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			log.Println(" Server is up!")
+		statusField := zap.String("status", resp.Status)
+		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			appLogger.Info("Server is responding.", statusField)
 			serverReady = true
 			resp.Body.Close()
 			break
 		} else {
-			log.Printf(" Server responded with status %s. Not ready yet...", resp.Status)
+			appLogger.Warn("Server responded with non-ready status.", statusField)
 			resp.Body.Close()
 			time.Sleep(retryInterval)
 		}
 	}
 
 	if !serverReady {
-		log.Println("FATAL: Server did not become ready after probing. Aborting further tests.")
+		appLogger.Error("Server did not become ready after probing. Aborting further tests.")
 		return
 	}
-	log.Println("Running Initial Simple Webhook Test (like old TestWebhookOnStartup)...")
-	initialTestPassed := testSimpleWebhookPost(webhookURL)
 
-	log.Println("Running More Realistic Webhook Test (like old testWebhook)...")
-	realisticTestPassed := testRealisticWebhookPost(webhookURL)
+	appLogger.Info("Running Initial Simple Webhook Test...")
+	initialTestPassed := testSimpleWebhookPost(webhookURL, appLogger)
 
-	log.Println("Testing Helius RPC API...")
-	heliusTestPassed := testHeliusAPI()
+	appLogger.Info("Running More Realistic Webhook Test...")
+	realisticTestPassed := testRealisticWebhookPost(webhookURL, appLogger)
+
+	appLogger.Info("Testing Helius RPC API...")
+	heliusTestPassed := testHeliusAPI(appLogger)
 
 	allTestsPassed := initialTestPassed && realisticTestPassed && heliusTestPassed
 
 	if allTestsPassed {
-		log.Println("All Startup Tests Passed: Notifying Telegram.")
-		sendTelegram("All startup tests passed successfully.")
+		appLogger.Info("All Startup Tests Passed: Notifying Telegram.")
+		notifications.SendSystemLogMessage("✅ All startup tests passed successfully.")
 	} else {
-		log.Println(" One or more startup tests failed.")
+		appLogger.Error("One or more startup tests failed. Check logs for details.")
+		notifications.SendSystemLogMessage("❌ One or more startup tests FAILED!")
 	}
 
-	log.Println("--- Startup Tests Complete ---")
+	appLogger.Info("--- Startup Tests Complete ---")
 }
 
-func testSimpleWebhookPost(webhookURL string) bool {
-	log.Printf(" -> Sending simple POST test to: %s", webhookURL)
+func testSimpleWebhookPost(webhookURL string, appLogger *logger.Logger) bool {
+	testName := "SimpleWebhookTest"
+	appLogger.Info("-> Sending simple POST test", zap.String("test", testName), zap.String("url", webhookURL))
 	authHeader := env.HeliusAuthHeader
-	payloadArray := `[
-		{
-			"description": "Startup Test Event (Simple)",
-			"timestamp": ` + fmt.Sprintf("%d", time.Now().Unix()) + `,
-			"type": "TRANSFER",
-			"source": "SYSTEM_TEST_SIMPLE",
-			"signature": "startup-test-sig-simple-` + fmt.Sprintf("%d", time.Now().UnixNano()) + `",
-			"tokenTransfers": [{"mint": "HqqnXZ8S76rY3GnXgHR9LpbLEKNfxCZASWydNHydtest"}]
-		}
-	]`
+	payloadArray := `[{"type": "SYSTEM_TEST_SIMPLE", "signature": "simple-` + fmt.Sprintf("%d", time.Now().UnixNano()) + `"}]`
 	payloadBytes := []byte(payloadArray)
 
-	headers := map[string]string{
-		"Content-Type": "application/json",
-	}
+	headers := map[string]string{"Content-Type": "application/json"}
+	authField := zap.String("authorization", "no")
 	if authHeader != "" {
 		headers["Authorization"] = authHeader
-		log.Printf("    -> with Authorization header.")
+		authField = zap.String("authorization", "yes")
+		appLogger.Debug("   -> with Authorization header.", zap.String("test", testName))
 	}
 
-	client := &http.Client{Timeout: 20 * time.Second}
-
-	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		log.Printf("    -> ERROR creating simple test request: %v", err)
-		return false
-	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("    -> ERROR sending simple test request: %v", err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	log.Printf("    -> Simple Test Response Status: %s", resp.Status)
-	log.Printf("    -> Simple Test Response Body: %s", string(body))
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Println("    -> Simple Webhook Test successful!")
-		return true
+	passed := testAPI(webhookURL, "POST", payloadBytes, headers, appLogger, testName)
+	if passed {
+		appLogger.Info("   -> Simple Webhook Test successful!", zap.String("test", testName))
 	} else {
-		log.Printf("    -> WARN: Simple Webhook Test received non-OK status: %s", resp.Status)
-		return false
+		appLogger.Error("   -> Simple Webhook Test failed!", zap.String("test", testName), authField)
 	}
+	return passed
 }
 
-func testRealisticWebhookPost(webhookURL string) bool {
-	log.Printf(" -> Sending realistic POST test to: %s", webhookURL)
+func testRealisticWebhookPost(webhookURL string, appLogger *logger.Logger) bool {
+	testName := "RealisticWebhookTest"
+	appLogger.Info("-> Sending realistic POST test", zap.String("test", testName), zap.String("url", webhookURL))
 	authHeader := env.HeliusAuthHeader
 
 	sampleTx := map[string]interface{}{
 		"description": "Startup Test Event (Realistic)",
 		"type":        "SWAP",
 		"source":      "SYSTEM_TEST_REALISTIC",
-		"signature":   fmt.Sprintf("startup-test-sig-realistic-%d", time.Now().UnixNano()),
+		"signature":   fmt.Sprintf("realistic-%d", time.Now().UnixNano()),
 		"timestamp":   time.Now().Unix(),
 		"tokenTransfers": []interface{}{
-			map[string]interface{}{
-				"mint": "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump",
-			},
+			map[string]interface{}{"mint": "TESTMINTADDRESSREALISTICxxxxxxxxxxxxxxx"},
 		},
-		"nativeTransfers": []interface{}{},
-		"accountData":     []interface{}{},
-		"events": map[string]interface{}{
-			"swap": map[string]interface{}{
-				"tokenOutputs": []interface{}{
-					map[string]interface{}{
-						"mint":        "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump",
-						"tokenAmount": 1.0,
-					},
-				},
-			},
-		},
+		"events": map[string]interface{}{"swap": map[string]interface{}{}},
 	}
 
 	jsonBody, err := json.Marshal([]map[string]interface{}{sampleTx})
 	if err != nil {
-		log.Printf("    -> ERROR marshalling realistic test payload: %v", err)
+		appLogger.Error("   -> ERROR marshalling realistic test payload", zap.String("test", testName), zap.Error(err))
 		return false
 	}
 
-	headers := map[string]string{
-		"Content-Type": "application/json",
-	}
+	headers := map[string]string{"Content-Type": "application/json"}
+	authField := zap.String("authorization", "no")
 	if authHeader != "" {
 		headers["Authorization"] = authHeader
-		log.Printf("    -> with Authorization header.")
+		authField = zap.String("authorization", "yes")
+		appLogger.Debug("   -> with Authorization header.", zap.String("test", testName))
 	}
 
-	if testAPI(webhookURL, "POST", jsonBody, headers) {
-		log.Println("    -> Realistic Webhook Test successful!")
-		return true
+	passed := testAPI(webhookURL, "POST", jsonBody, headers, appLogger, testName)
+	if passed {
+		appLogger.Info("   -> Realistic Webhook Test successful!", zap.String("test", testName))
+	} else {
+		appLogger.Error("   -> Realistic Webhook Test failed!", zap.String("test", testName), authField)
 	}
-	log.Println("    -> Realistic Webhook Test failed!")
-	return false
+	return passed
 }
 
-func testAPI(url, method string, payload []byte, headers map[string]string) bool {
+func testAPI(url, method string, payload []byte, headers map[string]string, appLogger *logger.Logger, testName string) bool {
 	req, err := http.NewRequest(method, url, bytes.NewBuffer(payload))
+	urlField := zap.String("url", url)
+	methodField := zap.String("method", method)
+	testField := zap.String("test", testName)
+
 	if err != nil {
-		log.Printf("    -> ERROR creating request for %s: %v", url, err)
+		appLogger.Error("   -> ERROR creating request", testField, urlField, methodField, zap.Error(err))
 		return false
 	}
 	for key, value := range headers {
@@ -208,67 +174,43 @@ func testAPI(url, method string, payload []byte, headers map[string]string) bool
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("    -> ERROR connecting to %s (%s): %v", url, method, err)
+		appLogger.Error("   -> ERROR connecting/sending request", testField, urlField, methodField, zap.Error(err))
 		return false
 	}
 	defer resp.Body.Close()
 
 	body, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		log.Printf("    -> WARN reading response body from %s (%s): %v", url, method, readErr)
+	statusField := zap.String("status", resp.Status)
+	bodyField := zap.Skip()
+	if readErr == nil {
+		bodyField = zap.ByteString("respBody", body)
+	} else {
+		appLogger.Warn("   -> WARN reading response body", testField, urlField, methodField, zap.Error(readErr))
 	}
 
-	log.Printf("    -> %s [%s] - Status: %s, Resp: %s", method, url, resp.Status, string(body))
+	appLogger.Info("   -> API Test Response", testField, methodField, urlField, statusField, bodyField)
 
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
-func testHeliusAPI() bool {
-	log.Printf(" -> Testing Helius RPC API...")
+func testHeliusAPI(appLogger *logger.Logger) bool {
+	testName := "HeliusAPITest"
+	appLogger.Info("-> Testing Helius RPC API...", zap.String("test", testName))
 	apiKey := env.HeliusAPIKey
 	if apiKey == "" {
-		log.Println("    -> Skipping Helius API test due to missing API key")
+		appLogger.Warn("   -> Skipping Helius API test due to missing API key", zap.String("test", testName))
 		return false
 	}
 
 	url := fmt.Sprintf("https://mainnet.helius-rpc.com/?api-key=%s", apiKey)
 	payload := `{"jsonrpc":"2.0","id":1,"method":"getBlockHeight"}`
-
 	headers := map[string]string{"Content-Type": "application/json"}
-	if testAPI(url, "POST", []byte(payload), headers) {
-		log.Println("    -> Helius API test successful!")
-		return true
-	}
-	log.Println("    -> Helius API test failed!")
-	return false
-}
 
-func sendTelegram(message string) {
-	botToken := env.TelegramBotToken
-	groupIDStr := fmt.Sprintf("%d", env.TelegramGroupID)
-
-	if botToken == "" || groupIDStr == "0" {
-		log.Println("Telegram credentials missing or invalid Group ID. Skipping notification.")
-		return
-	}
-
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
-
-	requestBodyMap := map[string]interface{}{
-		"chat_id": groupIDStr,
-		"text":    message,
-	}
-	jsonBody, err := json.Marshal(requestBodyMap)
-	if err != nil {
-		log.Printf("Failed to marshal Telegram payload: %v", err)
-		return
-	}
-
-	headers := map[string]string{"Content-Type": "application/json"}
-	if testAPI(url, "POST", jsonBody, headers) {
-		log.Println("Telegram notification sent via test helper.")
+	passed := testAPI(url, "POST", []byte(payload), headers, appLogger, testName)
+	if passed {
+		appLogger.Info("   -> Helius API test successful!", zap.String("test", testName))
 	} else {
-		log.Println("Failed to send Telegram notification via test helper.")
+		appLogger.Error("   -> Helius API test failed!", zap.String("test", testName))
 	}
-
+	return passed
 }

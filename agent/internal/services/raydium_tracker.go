@@ -4,18 +4,19 @@ import (
 	"bytes"
 	"ca-scraper/agent/internal/events"
 	"ca-scraper/shared/env"
+	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type RaydiumTransaction struct {
@@ -34,20 +35,24 @@ type SwapCacheEntry struct {
 	LastUpdated time.Time
 }
 
-func TrackGraduatedToken(tokenAddress string) {
-	log.Printf("Monitoring swaps for newly graduated token: %s", tokenAddress)
-	go func() {
-		time.Sleep(1 * time.Minute)
-		log.Printf(" Started tracking token: %s", tokenAddress)
-	}()
+var swapCache = struct {
+	sync.RWMutex
+	Data map[string]SwapCacheEntry
+}{Data: make(map[string]SwapCacheEntry)}
+
+func TrackGraduatedToken(tokenAddress string, appLogger *logger.Logger) {
+	appLogger.Info("Scheduling monitoring for newly graduated token", zap.String("tokenAddress", tokenAddress))
+	appLogger.Debug("Tracking initiated for token", zap.String("tokenAddress", tokenAddress))
 }
 
 const (
 	validationVolumeThreshold = 500.0
 	validationCheckInterval   = 3 * time.Minute
+	swapCacheMaxRetention     = 30 * time.Minute
+	swapCacheCleanupInterval  = 5 * time.Minute
 )
 
-func HandleTransactionWebhookWithPayload(transactions []map[string]interface{}) {
+func HandleTransactionWebhookWithPayload(transactions []map[string]interface{}, appLogger *logger.Logger) {
 	processedCount := 0
 	skippedAlreadySeen := 0
 	skippedCriteria := 0
@@ -59,15 +64,18 @@ func HandleTransactionWebhookWithPayload(transactions []map[string]interface{}) 
 			continue
 		}
 		txSignature, _ := tx["signature"].(string)
+		sigField := zap.String("signature", txSignature)
 		if txSignature == "" {
-			log.Println(" Transaction missing signature, skipping...")
+			appLogger.Warn("Transaction missing signature, skipping processing.")
 			skippedMissingData++
 			continue
 		}
+
 		if _, exists := batchSeen[txSignature]; exists {
 			skippedAlreadySeen++
 			continue
 		}
+
 		seenTransactions.Lock()
 		_, exists := seenTransactions.TxIDs[txSignature]
 		if exists {
@@ -75,7 +83,8 @@ func HandleTransactionWebhookWithPayload(transactions []map[string]interface{}) 
 			skippedAlreadySeen++
 			continue
 		}
-		if !processSwapTransaction(tx) {
+
+		if !processSwapTransaction(tx, appLogger) {
 			seenTransactions.Unlock()
 			skippedCriteria++
 			continue
@@ -85,164 +94,167 @@ func HandleTransactionWebhookWithPayload(transactions []map[string]interface{}) 
 		seenTransactions.TxIDs[txSignature] = struct{}{}
 		seenTransactions.Unlock()
 
-		log.Printf("Transaction %s successfully processed and cached.", txSignature)
+		appLogger.Debug("Transaction successfully processed and cached.", sigField)
 		processedCount++
 	}
-	log.Printf("Webhook payload processing complete. Processed: %d, Skipped (Seen): %d, Skipped (Criteria): %d, Skipped (Missing Data): %d",
-		processedCount, skippedAlreadySeen, skippedCriteria, skippedMissingData)
+	appLogger.Info("Webhook payload batch processing complete.",
+		zap.Int("processed", processedCount),
+		zap.Int("skippedSeen", skippedAlreadySeen),
+		zap.Int("skippedCriteria", skippedCriteria),
+		zap.Int("skippedMissingData", skippedMissingData))
 }
 
-func processSwapTransaction(tx map[string]interface{}) bool {
+func processSwapTransaction(tx map[string]interface{}, appLogger *logger.Logger) bool {
 	txSignature, _ := tx["signature"].(string)
-	tokenMint, hasMint := tx["tokenMint"].(string)
-	usdValue, hasValue := tx["usdValue"].(float64)
+	sigField := zap.String("signature", txSignature)
+	tokenMint, foundMint := events.ExtractNonSolMintFromEvent(tx)
+	mintField := zap.String("tokenMint", tokenMint)
 
-	if !hasMint || tokenMint == "" {
-		log.Printf("Transaction %s missing token mint, cannot cache.", txSignature)
+	if !foundMint {
+		appLogger.Warn("Transaction missing relevant non-SOL token mint, cannot cache.", sigField)
 		return false
 	}
+
+	usdValue, hasValue := tx["usdValue"].(float64)
 	if !hasValue {
-		log.Printf("Transaction %s missing USD value, caching with 0 value.", txSignature)
+		appLogger.Debug("Transaction missing USD value, caching with 0 value.", sigField, mintField)
 		usdValue = 0
 	}
+	usdField := zap.Float64("usdValue", usdValue)
 
 	swapCache.Lock()
 	entry, exists := swapCache.Data[tokenMint]
 	if !exists {
 		entry = SwapCacheEntry{
-			Volumes: make([]float64, 0, 1),
+			Volumes: make([]float64, 0, 5),
 		}
 	}
 	entry.Volumes = append(entry.Volumes, usdValue)
 	entry.LastUpdated = time.Now()
 	swapCache.Data[tokenMint] = entry
+	currentTotalVolume := sum(entry.Volumes)
 	swapCache.Unlock()
 
-	log.Printf("Cached swap for token: %s with value $%.2f (Tx: %s). Total cached volume: %.2f", tokenMint, usdValue, txSignature, sum(entry.Volumes))
+	appLogger.LogToScanner(zapcore.DebugLevel, "Cached swap for token",
+		mintField,
+		usdField,
+		zap.Float64("newTotalVolume", currentTotalVolume),
+		sigField)
 
 	return true
 }
 
-func HandleTransactionWebhook(c *gin.Context) {
-	if env.HeliusAuthHeader != "" {
-		if c.GetHeader("Authorization") != env.HeliusAuthHeader {
-			log.Printf("Unauthorized webhook call received. Expected Header: %s, Received: %s", env.HeliusAuthHeader, c.GetHeader("Authorization"))
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			return
-		}
-	} else {
-		log.Println("Warning: No HELIUS_AUTH_HEADER set, accepting webhook calls without Authorization check.")
-	}
-
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		log.Printf("Error reading webhook body: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
-		return
-	}
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
+func HandleTransactionWebhook(payload []byte, appLogger *logger.Logger) {
+	requestID := zap.String("requestID", generateRequestID())
+	appLogger.Info("Handling Transaction Webhook Request", requestID)
 
 	var transactions []map[string]interface{}
-	if err := json.Unmarshal(body, &transactions); err != nil {
+	if err := json.Unmarshal(payload, &transactions); err != nil {
 		var singleTransaction map[string]interface{}
-		bodyReader := bytes.NewReader(body)
+		bodyReader := bytes.NewReader(payload)
 		if decodeErr := json.NewDecoder(bodyReader).Decode(&singleTransaction); decodeErr != nil {
-			log.Printf(" Invalid webhook JSON format (neither array nor single object): %v", decodeErr)
-			log.Printf("Received Body: %s", string(body))
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format"})
+			appLogger.Error("Invalid swap webhook JSON format (neither array nor single object)", zap.Error(decodeErr), zap.ByteString("payload", payload), requestID)
 			return
 		}
 		transactions = []map[string]interface{}{singleTransaction}
 	}
 
-	log.Printf("Processing %d transaction(s) from webhook for immediate validation...", len(transactions))
+	appLogger.Info("Processing transactions from swap webhook for immediate validation", zap.Int("count", len(transactions)), requestID)
 
 	validatedCount := 0
 	for _, tx := range transactions {
 		if tx == nil {
-			log.Println("Skipping nil transaction in webhook payload.")
+			appLogger.Warn("Skipping nil transaction in swap webhook payload", requestID)
 			continue
 		}
 
 		txSignature, _ := tx["signature"].(string)
 		if txSignature == "" {
-			log.Println("Webhook transaction missing signature, skipping...")
+			appLogger.Warn("Swap webhook transaction missing signature, skipping...", requestID)
 			continue
 		}
+		sigField := zap.String("signature", txSignature)
 
 		seenTransactions.Lock()
 		_, exists := seenTransactions.TxIDs[txSignature]
 		if exists {
 			seenTransactions.Unlock()
-			log.Printf("Transaction %s already seen, skipping.", txSignature)
+			appLogger.Debug("Transaction already seen, skipping immediate validation.", sigField, requestID)
 			continue
 		}
 		seenTransactions.TxIDs[txSignature] = struct{}{}
 		seenTransactions.Unlock()
 
 		tokenMint, foundMint := events.ExtractNonSolMintFromEvent(tx)
+		mintField := zap.String("tokenMint", tokenMint)
 
 		if !foundMint {
-			log.Printf("Could not extract relevant non-SOL token mint from webhook transaction %s, skipping validation.", txSignature)
+			appLogger.Debug("Could not extract relevant non-SOL token mint from swap webhook transaction, skipping validation.", sigField, requestID)
 			continue
 		}
 
-		log.Printf("Extracted token %s from webhook tx %s, performing immediate check.", tokenMint, txSignature)
+		appLogger.LogToScanner(zapcore.InfoLevel, "Performing immediate DexScreener check (from swap webhook)", mintField, sigField, requestID)
 
-		validationResult, err := IsTokenValid(tokenMint)
+		validationResult, err := IsTokenValid(tokenMint, appLogger)
+
 		if err != nil {
-			log.Printf("Error checking token %s (from tx %s) with DexScreener: %v", tokenMint, txSignature, err)
+			appLogger.LogToScanner(zapcore.WarnLevel, "Error checking token with DexScreener (swap webhook)", mintField, sigField, zap.Error(err), requestID)
 			continue
 		}
 
 		if validationResult == nil || !validationResult.IsValid {
-			reason := "Did not meet criteria or validation failed"
+			reason := "Did not meet criteria or validation failed (nil result)"
 			if validationResult != nil && len(validationResult.FailReasons) > 0 {
 				reason = strings.Join(validationResult.FailReasons, "; ")
 			}
-			log.Printf("Token %s (from tx %s) does not meet immediate criteria. Reason: %s", tokenMint, txSignature, reason)
+			appLogger.LogToScanner(zapcore.InfoLevel, "Token does not meet immediate criteria (swap webhook).", mintField, sigField, zap.String("reason", reason), requestID)
 			continue
 		}
 
-		log.Printf("Valid Swap Detected via Webhook: Tx %s for token %s", txSignature, tokenMint)
+		appLogger.LogToScanner(zapcore.InfoLevel, "Valid Swap Detected via Webhook (Immediate Check)", mintField, sigField, requestID)
 		validatedCount++
 
 		dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenMint)
 		dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
 
 		telegramMessage := fmt.Sprintf(
-			"Hot Swap Validated\\! \nToken: `%s`\nDexScreener: %s\nTx: `%s`",
+			"🔥 Hot Swap Validated\\! 🔥\n\nToken: `%s`\nDexScreener: %s\nTx: `%s`",
 			tokenMint,
 			dexscreenerLinkEsc,
 			notifications.EscapeMarkdownV2(txSignature),
 		)
-		notifications.SendTelegramMessage(telegramMessage)
+		notifications.SendScannerLogMessage(telegramMessage)
 	}
 
-	log.Printf("Webhook handler finished. Processed: %d transaction(s), Immediately validated & notified: %d", len(transactions), validatedCount)
-	c.JSON(http.StatusOK, gin.H{"status": "success", "processed": len(transactions), "validated_now": validatedCount})
+	appLogger.Info("Swap webhook processing finished.",
+		zap.Int("processed", len(transactions)),
+		zap.Int("validatedNow", validatedCount),
+		requestID)
+
 }
 
-func CreateHeliusWebhook(webhookURL string) bool {
+func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
+	appLogger.Info("Setting up/Verifying Raydium Swap Webhook", zap.String("url", webhookURL))
 
 	apiKey := env.HeliusAPIKey
 	webhookSecret := env.WebhookSecret
 	authHeader := env.HeliusAuthHeader
 	addressesRaw := env.RaydiumAccountAddresses
-	pumpFunAuthority := env.PumpFunAuthority
 
 	if apiKey == "" {
-		log.Fatal("FATAL: HELIUS_API_KEY is missing from env package! Ensure env.LoadEnv() ran successfully in main.")
+		appLogger.Fatal("HELIUS_API_KEY is missing! Cannot create webhook.")
+		return false
 	}
 	if webhookSecret == "" {
-		log.Fatal("FATAL: WEBHOOK_SECRET is missing from env package! Ensure env.LoadEnv() ran successfully in main.")
+		appLogger.Fatal("WEBHOOK_SECRET is missing! Cannot create webhook.")
+		return false
 	}
 	if webhookURL == "" {
-		log.Println("Error: CreateHeliusWebhook called with empty webhookURL.")
+		appLogger.Error("CreateHeliusWebhook called with empty webhookURL.")
 		return false
 	}
 	if authHeader == "" {
-		log.Println("Warning: HELIUS_AUTH_HEADER is empty in env package! Webhook endpoint might be insecure.")
+		appLogger.Warn("HELIUS_AUTH_HEADER is empty! Webhook endpoint might be insecure.")
 	}
 
 	var accountList []string
@@ -253,35 +265,27 @@ func CreateHeliusWebhook(webhookURL string) bool {
 				accountList = append(accountList, trimmedAddr)
 			}
 		}
-		log.Printf("Using Raydium addresses from env: %v", accountList)
-	}
-
-	if pumpFunAuthority != "" {
-		trimmedPumpAddr := strings.TrimSpace(pumpFunAuthority)
-		alreadyExists := false
-		for _, existing := range accountList {
-			if existing == trimmedPumpAddr {
-				alreadyExists = true
-				break
-			}
-		}
-		if !alreadyExists {
-			log.Printf("Adding Pump.fun Authority Address from env: %s", trimmedPumpAddr)
-			accountList = append(accountList, trimmedPumpAddr)
-		} else {
-			log.Printf("Pump.fun Authority Address from env (%s) already in list.", trimmedPumpAddr)
-		}
+		appLogger.Info("Using Raydium addresses from env", zap.Strings("addresses", accountList))
 	} else {
-		log.Println("Info: PUMPFUN_AUTHORITY_ADDRESS not set in env package.")
+		appLogger.Warn("RAYDIUM_ACCOUNT_ADDRESSES is empty. Swap webhook might not receive relevant transactions.")
 	}
 
 	if len(accountList) == 0 {
-		log.Println("Warning: No addresses specified in env package (RAYDIUM_ACCOUNT_ADDRESSES or PUMPFUN_AUTHORITY_ADDRESS). Webhook might not receive relevant transactions.")
-
+		appLogger.Error("No addresses specified for Raydium webhook. Aborting creation.")
+		return false
 	}
 
-	log.Printf("Final List of Addresses for Helius Webhook: %v", accountList)
-	log.Printf("Expecting incoming Helius webhooks to have Authorization header: %s", authHeader)
+	appLogger.Info("Final address list for Raydium webhook", zap.Strings("addresses", accountList))
+	appLogger.Info("Expecting Raydium webhook Authorization header", zap.String("headerValue", authHeader))
+
+	found, err := CheckExistingHeliusWebhook(webhookURL, appLogger)
+	if err != nil {
+		appLogger.Error("Failed check for existing Raydium webhook, attempting creation regardless.", zap.Error(err))
+	}
+	if found {
+		appLogger.Info("Raydium webhook already exists.", zap.String("url", webhookURL))
+		return true
+	}
 
 	payload := map[string]interface{}{
 		"webhookURL":       webhookURL,
@@ -294,14 +298,14 @@ func CreateHeliusWebhook(webhookURL string) bool {
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Error: Failed to marshal Helius webhook payload: %v", err)
+		appLogger.Error("Failed to marshal Helius webhook payload", zap.Error(err))
 		return false
 	}
 
 	heliusURL := fmt.Sprintf("https://api.helius.xyz/v0/webhooks?api-key=%s", apiKey)
 	req, err := http.NewRequest("POST", heliusURL, bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		log.Printf("Error: Failed to create Helius webhook request: %v", err)
+		appLogger.Error("Failed to create Helius webhook request", zap.Error(err))
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -310,115 +314,95 @@ func CreateHeliusWebhook(webhookURL string) bool {
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error: Failed to send request to Helius API: %v", err)
+		appLogger.Error("Failed to send request to Helius API", zap.Error(err))
 		return false
 	}
 	defer resp.Body.Close()
 
 	body, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		log.Printf("Warning: Failed to read Helius webhook creation response body: %v", readErr)
+	responseBodyStr := ""
+	if readErr == nil {
+		responseBodyStr = string(body)
+	} else {
+		appLogger.Warn("Failed to read Helius webhook creation response body", zap.Error(readErr))
 	}
 
-	log.Printf("Helius Webhook API Response Status: %s", resp.Status)
-	if len(body) > 0 {
-		log.Printf("Helius Webhook API Response Body: %s", string(body))
-	}
+	statusField := zap.Int("statusCode", resp.StatusCode)
+	bodyField := zap.String("responseBody", responseBodyStr)
+	appLogger.Info("Helius Webhook API Response", zap.String("status", resp.Status), bodyField)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Println("Helius webhook created or updated successfully.")
+		appLogger.Info("Helius Raydium webhook created or updated successfully.")
 		return true
 	} else {
-		log.Printf("Error: Failed to create/update Helius webhook. Status: %d Body: %s", resp.StatusCode, string(body))
+		appLogger.Error("Failed to create/update Helius Raydium webhook.", statusField, bodyField)
 		return false
 	}
 }
 
-func TestWebhookWithAuth() {
+func TestWebhookWithAuth(appLogger *logger.Logger) {
 	webhookURL := env.WebhookURL
 	authHeader := env.HeliusAuthHeader
 
 	if webhookURL == "" {
-		log.Fatal("FATAL: WEBHOOK_LISTENER_URL_DEV is missing from env package for testing!")
-	}
-	if authHeader == "" {
-		log.Println("Warning: HELIUS_AUTH_HEADER is empty in env package! Sending test webhook without Authorization.")
+		appLogger.Fatal("Webhook URL env var missing for testing!")
 	}
 
 	reqBody := []map[string]interface{}{
 		{
-			"description": "Test swap SOL -> GUM " + time.Now().Format(time.RFC3339),
+			"description": "Test swap " + time.Now().Format(time.RFC3339),
 			"type":        "SWAP",
 			"source":      "RAYDIUM",
 			"signature":   fmt.Sprintf("test-sig-%d", time.Now().UnixNano()),
 			"timestamp":   time.Now().Unix(),
 			"tokenTransfers": []interface{}{
-				map[string]interface{}{
-					"fromUserAccount": "SourceWallet",
-					"toUserAccount":   "DestinationWalletATA",
-					"mint":            "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump", // Example mint
-					"tokenAmount":     1500000000.0,
-				},
+				map[string]interface{}{"mint": "TESTMINTADDRESSPLACEHOLDERxxxxxxxxxxxxxxx"},
 			},
-			"nativeTransfers": []interface{}{
-				map[string]interface{}{
-					"fromUserAccount": "SourceWallet",
-					"toUserAccount":   "SomeRaydiumAccount",
-					"amount":          100000000,
-				},
-			},
-			"accountData":      []interface{}{},
-			"transactionError": nil,
-			"events": map[string]interface{}{
-				"swap": map[string]interface{}{
-					"nativeInput": map[string]interface{}{
-						"account": "SourceWallet",
-						"amount":  100000000,
-					},
-					"tokenOutputs": []interface{}{
-						map[string]interface{}{
-							"account":     "DestinationWalletATA",
-							"mint":        "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump",
-							"tokenAmount": 1500000000.0,
-						},
-					},
-				},
-			},
+			"events": map[string]interface{}{"swap": map[string]interface{}{}},
 		},
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		log.Fatalf("TestWebhook: Failed to marshal test body: %v", err)
+		appLogger.Fatal("TestWebhook failed to marshal test body", zap.Error(err))
 	}
 
 	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		log.Fatalf("TestWebhook: Failed to create request: %v", err)
+		appLogger.Fatal("TestWebhook failed to create request", zap.Error(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	urlField := zap.String("url", webhookURL)
+	authField := zap.String("authHeader", "missing")
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
-		log.Printf("Sending Test Webhook to: %s with Auth Header: %s", webhookURL, authHeader)
+		authField = zap.String("authHeader", "present")
 	} else {
-		log.Printf("Sending Test Webhook to: %s (No Auth Header)", webhookURL)
+		appLogger.Warn("Sending Test Webhook without Authorization header")
 	}
+	appLogger.Info("Sending Test Webhook...", urlField, authField)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("TestWebhook: Failed to send request: %v", err)
+		appLogger.Error("TestWebhook failed to send request", zap.Error(err), urlField)
+		return
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
-	log.Printf("Test Webhook Response Status: %s", resp.Status)
-	log.Printf("Test Webhook Response Body: %s", string(respBody))
+	respBody, readErr := io.ReadAll(resp.Body)
+	statusField := zap.String("status", resp.Status)
+	if readErr != nil {
+		appLogger.Warn("TestWebhook failed to read response body", zap.Error(readErr), statusField)
+	}
+
+	appLogger.Info("Test Webhook Response", statusField, zap.ByteString("body", respBody))
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Test Webhook received non-OK status: %s", resp.Status)
+		appLogger.Warn("Test Webhook received non-OK status", statusField)
 	} else {
-		log.Println("Test Webhook received OK status.")
+		appLogger.Info("Test Webhook received OK status.")
 	}
 }
 
@@ -430,23 +414,23 @@ func sum(volumes []float64) float64 {
 	return total
 }
 
-func ValidateAndNotifyCachedSwaps() {
-	log.Printf("Swap validation & notification loop started (Interval: %v, Volume Threshold: $%.2f).",
-		validationCheckInterval, validationVolumeThreshold)
+func ValidateAndNotifyCachedSwaps(appLogger *logger.Logger) {
+	appLogger.Info("Swap validation & notification loop started",
+		zap.Duration("interval", validationCheckInterval),
+		zap.Float64("volumeThreshold", validationVolumeThreshold))
 
 	ticker := time.NewTicker(validationCheckInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		log.Println("Running validation check on cached swaps...")
+		appLogger.Debug("Running validation check cycle on cached swaps...")
 
 		swapCache.RLock()
 		tokensToValidate := make(map[string]float64)
 		cacheSize := len(swapCache.Data)
-
 		for token, entry := range swapCache.Data {
 			if entry.Volumes == nil {
-				log.Printf("WARN: Found cache entry with nil Volumes for token %s. Skipping.", token)
+				appLogger.Warn("Found cache entry with nil Volumes", zap.String("token", token))
 				continue
 			}
 			totalVolume := sum(entry.Volumes)
@@ -456,38 +440,40 @@ func ValidateAndNotifyCachedSwaps() {
 		}
 		swapCache.RUnlock()
 
-		log.Printf("Found %d tokens in cache. Checking %d token(s) meeting volume threshold ($%.2f).",
-			cacheSize, len(tokensToValidate), validationVolumeThreshold)
+		count := len(tokensToValidate)
+		appLogger.Info("Swap validation check", zap.Int("cachedTokens", cacheSize), zap.Int("tokensMeetingThreshold", count))
+
+		if count == 0 {
+			continue
+		}
 
 		validatedCount := 0
-		failedCount := 0
+		failedOrRateLimitedCount := 0
 		processedCount := 0
 
 		for token, totalVolume := range tokensToValidate {
 			processedCount++
-			log.Printf("Checking cached token %s (Vol: $%.2f) via validation loop.", token, totalVolume)
+			tokenField := zap.String("tokenAddress", token)
+			volumeField := zap.Float64("totalVolume", totalVolume)
+			appLogger.Debug("Checking cached token via validation loop.", tokenField, volumeField)
 
-			validationResult, err := IsTokenValid(token)
+			validationResult, err := IsTokenValid(token, appLogger)
 
 			if err != nil {
-				if errors.Is(err, ErrRateLimited) {
-					log.Printf(" WARN: DexScreener rate limited checking token %s during validation loop. Will retry next cycle.", token)
-					failedCount++
-					continue
+				appLogger.LogToScanner(zapcore.WarnLevel, "Error/RateLimit checking token during validation loop", tokenField, volumeField, zap.Error(err))
+				if !errors.Is(err, ErrRateLimited) {
+					swapCache.Lock()
+					delete(swapCache.Data, token)
+					swapCache.Unlock()
+					appLogger.LogToScanner(zapcore.InfoLevel, "Removed token from cache due to non-rate-limit validation error.", tokenField)
 				}
-
-				log.Printf(" ERROR checking token %s during validation loop: %v", token, err)
-				failedCount++
-				swapCache.Lock()
-				delete(swapCache.Data, token)
-				swapCache.Unlock()
-				log.Printf("   Removed token %s from cache due to non-rate-limit validation error.", token)
+				failedOrRateLimitedCount++
 				continue
 			}
 
 			if validationResult != nil && validationResult.IsValid {
 				validatedCount++
-				log.Printf("Token %s (Vol: $%.2f) PASSED validation via loop.", token, totalVolume)
+				appLogger.LogToScanner(zapcore.InfoLevel, "Token PASSED validation via volume check loop.", tokenField, volumeField)
 
 				dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", token)
 				dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
@@ -502,52 +488,47 @@ func ValidateAndNotifyCachedSwaps() {
 					totalVolume,
 					dexscreenerLinkEsc,
 				)
-				notifications.SendTelegramMessage(telegramMessage)
+				notifications.SendScannerLogMessage(telegramMessage)
 
 				swapCache.Lock()
 				delete(swapCache.Data, token)
 				swapCache.Unlock()
-				log.Printf("   Removed validated token %s from cache.", token)
+				appLogger.LogToScanner(zapcore.InfoLevel, "Removed validated token from swap cache.", tokenField)
 
 			} else {
-				failedCount++
+				failedOrRateLimitedCount++
 				reason := "Did not meet criteria or validation failed (nil result)"
 				if validationResult != nil && len(validationResult.FailReasons) > 0 {
 					reason = strings.Join(validationResult.FailReasons, "; ")
 				} else if validationResult != nil && !validationResult.IsValid {
 					reason = "Did not meet criteria (no specific reasons returned)"
 				}
-				log.Printf("Token %s (Vol: $%.2f) FAILED validation via loop. Reason: %s", token, totalVolume, reason)
+				appLogger.LogToScanner(zapcore.InfoLevel, "Token FAILED validation via volume check loop.", tokenField, volumeField, zap.String("reason", reason))
 
 				swapCache.Lock()
 				delete(swapCache.Data, token)
 				swapCache.Unlock()
-				log.Printf("   Removed failed/invalid token %s from cache.", token)
+				appLogger.LogToScanner(zapcore.InfoLevel, "Removed failed/invalid token from swap cache.", tokenField)
 			}
+			time.Sleep(50 * time.Millisecond)
 		}
-		log.Printf("Validation check complete. Processed %d tokens this cycle. Validated & Notified: %d, Failed/RateLimited: %d",
-			processedCount, validatedCount, failedCount)
+		appLogger.Info("Swap validation check cycle complete.",
+			zap.Int("processed", processedCount),
+			zap.Int("validated", validatedCount),
+			zap.Int("failedOrRateLimited", failedOrRateLimitedCount))
 	}
 }
 
-func init() {
-	go ValidateAndNotifyCachedSwaps()
-	go CleanSwapCachePeriodically()
-	log.Println("Raydium Tracker service background routines started.")
-}
+func CleanSwapCachePeriodically(appLogger *logger.Logger) {
+	appLogger.Info("Swap cache cleanup routine started",
+		zap.Duration("interval", swapCacheCleanupInterval),
+		zap.Duration("retention", swapCacheMaxRetention))
 
-const (
-	swapCacheMaxRetention    = 30 * time.Minute
-	swapCacheCleanupInterval = 5 * time.Minute
-)
-
-func CleanSwapCachePeriodically() {
-	log.Printf("Swap cache cleanup routine started (Interval: %v, Retention: %v).", swapCacheCleanupInterval, swapCacheMaxRetention)
 	ticker := time.NewTicker(swapCacheCleanupInterval)
 	defer ticker.Stop()
 
 	for currentTime := range ticker.C {
-		log.Printf("Running periodic swap cache cleanup...")
+		appLogger.Debug("Running periodic swap cache cleanup...")
 		tokensToDelete := []string{}
 		cutoffTime := currentTime.Add(-swapCacheMaxRetention)
 
@@ -560,9 +541,9 @@ func CleanSwapCachePeriodically() {
 		}
 		swapCache.RUnlock()
 
+		deletedCount := 0
 		if len(tokensToDelete) > 0 {
 			swapCache.Lock()
-			deletedCount := 0
 			for _, token := range tokensToDelete {
 				if entry, exists := swapCache.Data[token]; exists && entry.LastUpdated.Before(cutoffTime) {
 					delete(swapCache.Data, token)
@@ -570,10 +551,20 @@ func CleanSwapCachePeriodically() {
 				}
 			}
 			swapCache.Unlock()
-			log.Printf("Periodic swap cache cleanup finished. Removed %d expired entries (older than %v). Cache size before: %d, after: %d.",
-				deletedCount, swapCacheMaxRetention, cacheSizeBefore, cacheSizeBefore-deletedCount)
+		}
+
+		if deletedCount > 0 {
+			appLogger.Info("Periodic swap cache cleanup finished.",
+				zap.Int("removed", deletedCount),
+				zap.Duration("retention", swapCacheMaxRetention),
+				zap.Int("sizeBefore", cacheSizeBefore),
+				zap.Int("sizeAfter", cacheSizeBefore-deletedCount))
 		} else {
-			log.Printf("Periodic swap cache cleanup finished. No expired entries found. Cache size: %d", cacheSizeBefore)
+			appLogger.Debug("Periodic swap cache cleanup finished. No expired entries found.", zap.Int("currentSize", cacheSizeBefore))
 		}
 	}
+}
+
+func generateRequestID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }

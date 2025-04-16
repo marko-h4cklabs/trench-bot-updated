@@ -1,98 +1,120 @@
 package env
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"strconv"
-	"strings"
+
+	"github.com/joho/godotenv"
 )
 
 var (
-	HeliusAPIKey            string
-	WebhookSecret           string
-	WebhookURL              string
-	PumpFunAuthority        string
-	RaydiumAccountAddresses string
-	HeliusAuthHeader        string
-	Port                    string
-	TrenchDemonCollection   string
-	RaydiumAccounts         []string
+	TelegramBotToken    string
+	TelegramGroupID     int64
+	SystemLogsThreadID  int
+	ScannerLogsThreadID int
+	PotentialCAThreadID int
+	BotCallsThreadID    int
+	TrackingThreadID    int
 
-	TelegramBotToken   string
-	TelegramGroupID    int64
-	SystemLogsThreadID int
+	HeliusAPIKey     string
+	WebhookURL       string
+	WebhookSecret    string
+	HeliusAuthHeader string
+	PumpFunAuthority string
+
+	RaydiumWebhookURL       string
+	RaydiumAccountAddresses string
+
+	Port string
 )
 
-func LoadEnv() error {
-	HeliusAPIKey = os.Getenv("HELIUS_API_KEY")
-	WebhookSecret = os.Getenv("WEBHOOK_SECRET")
-	WebhookURL = os.Getenv("WEBHOOK_LISTENER_URL_DEV")
-	PumpFunAuthority = os.Getenv("PUMPFUN_AUTHORITY_ADDRESS")
-	RaydiumAccountAddresses = os.Getenv("RAYDIUM_ACCOUNT_ADDRESSES")
-	HeliusAuthHeader = os.Getenv("HELIUS_AUTH_HEADER")
-	Port = os.Getenv("PORT")
-	TrenchDemonCollection = os.Getenv("TRENCH_DEMON_COLLECTION")
-	TelegramBotToken = os.Getenv("TELEGRAM_BOT_TOKEN")
-	telegramGroupIDStr := os.Getenv("TELEGRAM_GROUP_ID")
-	systemLogsThreadIDStr := os.Getenv("SYSTEM_LOGS_THREAD_ID")
-
-	errorList := []string{}
-	if HeliusAPIKey == "" {
-		errorList = append(errorList, "missing required env var: HELIUS_API_KEY")
+func loadEnvVariable(key string, isRequired bool) string {
+	value := os.Getenv(key)
+	if isRequired && value == "" {
+		log.Fatalf("FATAL: Environment variable %s is required but not set.", key)
 	}
-	if WebhookSecret == "" {
-		log.Println("WARN: missing env var: WEBHOOK_SECRET (needed for webhook creation/auth)")
+	if value == "" {
+		log.Printf("INFO: Environment variable %s is not set.", key)
+	} else {
+		if key != "TELEGRAM_BOT_TOKEN" && key != "HELIUS_API_KEY" && key != "WEBHOOK_SECRET" {
+			log.Printf("INFO: Loaded %s = %s", key, value)
+		} else {
+			log.Printf("INFO: Loaded %s (value hidden)", key)
+		}
+	}
+	return value
+}
+
+func loadIntEnv(key string, required bool, isGroupID bool) int {
+	strValue := loadEnvVariable(key, required)
+	if strValue == "" {
+		if required {
+			log.Fatalf("FATAL: Required integer environment variable %s is missing.", key)
+		}
+		return 0
+	}
+	if isGroupID {
+		id, err := strconv.ParseInt(strValue, 10, 64)
+		if err != nil {
+			log.Fatalf("FATAL: Failed to parse integer environment variable %s: %v", key, err)
+		}
+		return int(id)
+	}
+
+	id, err := strconv.Atoi(strValue)
+	if err != nil {
+		log.Fatalf("FATAL: Failed to parse integer environment variable %s: %v", key, err)
+	}
+	return id
+}
+
+func LoadEnv() error {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("INFO: .env file not found or error loading, relying on system environment variables.")
+	} else {
+		log.Println("INFO: .env file loaded successfully.")
+	}
+
+	TelegramBotToken = loadEnvVariable("TELEGRAM_BOT_TOKEN", false)
+	HeliusAPIKey = loadEnvVariable("HELIUS_API_KEY", true)
+	WebhookURL = loadEnvVariable("WEBHOOK_LISTENER_URL_PROD", true)
+	WebhookSecret = loadEnvVariable("WEBHOOK_SECRET", false)
+	HeliusAuthHeader = loadEnvVariable("HELIUS_AUTH_HEADER", false)
+	PumpFunAuthority = loadEnvVariable("PUMPFUN_AUTHORITY_ADDRESS", true)
+
+	RaydiumWebhookURL = loadEnvVariable("RAYDIUM_WEBHOOK_URL", false)
+	RaydiumAccountAddresses = loadEnvVariable("RAYDIUM_ACCOUNT_ADDRESSES", false)
+
+	Port = loadEnvVariable("PORT", false)
+	if Port == "" {
+		Port = "8080"
+		log.Printf("INFO: PORT not set, defaulting to %s", Port)
+	}
+
+	TelegramGroupID = int64(loadIntEnv("TELEGRAM_GROUP_ID", true, true))
+	SystemLogsThreadID = loadIntEnv("SYSTEM_LOGS_THREAD_ID", false, false)
+	ScannerLogsThreadID = loadIntEnv("SCANNER_LOGS_THREAD_ID", false, false)
+	PotentialCAThreadID = loadIntEnv("POTENTIAL_CA_THREAD_ID", false, false)
+
+	BotCallsThreadID = loadIntEnv("BOT_CALLS_THREAD_ID", true, false)
+	TrackingThreadID = loadIntEnv("TRACKING_THREAD_ID", true, false)
+
+	if TelegramBotToken != "" && TelegramGroupID == 0 {
+		log.Println("WARN: TELEGRAM_BOT_TOKEN is set, but TELEGRAM_GROUP_ID is missing or invalid.")
 	}
 	if WebhookURL == "" {
-		errorList = append(errorList, "missing required env var: WEBHOOK_LISTENER_URL_DEV")
-	}
-	if TrenchDemonCollection == "" {
-		log.Println("WARN: missing env var: TRENCH_DEMON_COLLECTION (needed for NFT check)")
-	}
-	if TelegramBotToken == "" {
-		errorList = append(errorList, "missing required env var: TELEGRAM_BOT_TOKEN")
-	}
-	if telegramGroupIDStr == "" {
-		errorList = append(errorList, "missing required env var: TELEGRAM_GROUP_ID")
-	} else {
-		var err error
-		TelegramGroupID, err = strconv.ParseInt(telegramGroupIDStr, 10, 64)
-		if err != nil {
-			errorList = append(errorList, fmt.Sprintf("invalid TELEGRAM_GROUP_ID (must be integer): %v", err))
-		}
+		log.Println("WARN: WEBHOOK_LISTENER_URL_PROD (or DEV) is not set. Webhooks will not function.")
 	}
 
-	if systemLogsThreadIDStr != "" {
-		var err error
-		SystemLogsThreadID, err = strconv.Atoi(systemLogsThreadIDStr)
-		if err != nil {
-			log.Printf("WARN: invalid SYSTEM_LOGS_THREAD_ID (must be integer), defaulting to 0: %v", err)
-			SystemLogsThreadID = 0
-		}
-	} else {
-		SystemLogsThreadID = 0
+	if TelegramBotToken != "" && BotCallsThreadID == 0 {
+		log.Println("WARN: BOT_CALLS_THREAD_ID is missing or invalid. Validated token calls will not be sent.")
+	}
+	if TelegramBotToken != "" && TrackingThreadID == 0 {
+		log.Println("WARN: TRACKING_THREAD_ID is missing or invalid. Tracking updates will not be sent.")
 	}
 
-	if len(errorList) > 0 {
-		return fmt.Errorf("environment variable errors: %s", strings.Join(errorList, "; "))
-	}
-
-	if Port == "" {
-		Port = "5555"
-		log.Println("PORT not set, using default:", Port)
-	}
-
-	RaydiumAccounts = []string{}
-	if RaydiumAccountAddresses != "" {
-		for _, addr := range strings.Split(RaydiumAccountAddresses, ",") {
-			trimmedAddr := strings.TrimSpace(addr)
-			if trimmedAddr != "" {
-				RaydiumAccounts = append(RaydiumAccounts, trimmedAddr)
-			}
-		}
-	}
-
-	log.Println("Environment variables loaded into env package.")
+	log.Println("INFO: Environment variables loaded.")
 	return nil
 }

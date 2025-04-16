@@ -3,82 +3,76 @@ package bot
 import (
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
+	"context"
 	"fmt"
 
-	"log"
-
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"go.uber.org/zap"
 )
 
-var bot *tgbotapi.BotAPI
 var appLogger *logger.Logger
+var botInstance *tgbotapi.BotAPI
 
 func InitializeBot(logInstance *logger.Logger) error {
+	if logInstance == nil {
+		fmt.Println("FATAL ERROR: InitializeBot requires a non-nil logger instance")
+		return fmt.Errorf("logger instance provided to InitializeBot is nil")
+	}
 	appLogger = logInstance
-
-	err := notifications.InitTelegramBot()
-	if err != nil {
-		appLogger.Error("Failed to initialize Telegram bot via notifications package", zap.Error(err))
-		return fmt.Errorf("failed to initialize Telegram bot: %w", err)
+	botInstance = notifications.GetBotInstance()
+	if botInstance == nil {
+		appLogger.Error("Could not retrieve initialized Telegram bot instance from notifications package. Bot may not function.")
+		return fmt.Errorf("failed to get tgbotapi bot instance")
 	}
-	bot = notifications.GetBotInstance()
-	if bot == nil {
-		err := fmt.Errorf("failed to get bot instance from notifications package after initialization")
-		appLogger.Error(err.Error())
-		return err
-	}
-
-	appLogger.Info("Telegram bot services initialized successfully for listening.")
-
+	appLogger.Info("Telegram bot interaction services initialized using go-telegram-bot-api/v5.")
 	return nil
 }
 
-func StartListening() {
-	if bot == nil {
-		if appLogger != nil {
-			appLogger.Error("Telegram bot not initialized. Cannot start listening.")
-		} else {
-			log.Println("ERROR: Telegram bot not initialized. Cannot start listening.")
-		}
+func StartListening(ctx context.Context) {
+	if appLogger == nil {
+		fmt.Println("ERROR: Logger not initialized for bot listener. Cannot start.")
 		return
 	}
-	if appLogger != nil {
-		appLogger.Info("Starting Telegram bot message listener...")
-	} else {
-		log.Println("INFO: Starting Telegram bot message listener...")
+	if botInstance == nil {
+		appLogger.Warn("Bot API instance not available. Cannot start command listener.")
+		return
 	}
+	appLogger.Info("Starting bot message/command listener (go-telegram-bot-api/v5)...")
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
+	updates := botInstance.GetUpdatesChan(u)
+	appLogger.Info("Listening for Telegram commands and messages...")
 
-	updates := bot.GetUpdatesChan(u)
-
-	if appLogger != nil {
-		appLogger.Info("Listening for Telegram commands and messages...")
-	} else {
-		log.Println("INFO: Listening for Telegram commands and messages...")
-	}
-
-	for update := range updates {
-		if update.Message != nil {
-			if appLogger != nil {
-				appLogger.Debug("Received message",
-					zap.Int64("ChatID", update.Message.Chat.ID),
-					zap.String("From", update.Message.From.UserName),
-					zap.String("Text", update.Message.Text),
-				)
+	for {
+		select {
+		case update := <-updates:
+			if update.Message == nil || !update.Message.Chat.IsGroup() && !update.Message.Chat.IsSuperGroup() {
+				continue
 			}
 
-			if update.Message.IsCommand() {
-				HandleCommand(update)
+			if !update.Message.IsCommand() {
+				continue
 			}
+
+			chatID := update.Message.Chat.ID
+			fromUser := update.Message.From.UserName
+			fromUserID := update.Message.From.ID
+			text := update.Message.Text
+
+			appLogger.Zap().Debugw("Received command message",
+				"chatID", chatID,
+				"fromUser", fromUser,
+				"fromUserID", fromUserID,
+				"text", text,
+			)
+
+			command := update.Message.Command()
+			args := update.Message.CommandArguments()
+			go HandleCommand(update, command, args)
+
+		case <-ctx.Done():
+			appLogger.Info("Context cancelled. Stopping Telegram listener.")
+			return
 		}
-	}
-
-	if appLogger != nil {
-		appLogger.Info("Telegram bot update channel closed.")
-	} else {
-		log.Println("INFO: Telegram bot update channel closed.")
 	}
 }

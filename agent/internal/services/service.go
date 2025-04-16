@@ -5,11 +5,6 @@ import (
 	"sync"
 )
 
-var swapCache = struct {
-	sync.RWMutex
-	Data map[string]SwapCacheEntry
-}{Data: make(map[string]SwapCacheEntry)}
-
 type WebhookCache struct {
 	sync.Mutex
 	WebhookID string

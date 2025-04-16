@@ -1,10 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"strings"
-	"time"
-
 	"ca-scraper/agent/internal/bot"
 	"ca-scraper/agent/internal/handlers"
 	"ca-scraper/agent/internal/services"
@@ -12,17 +8,22 @@ import (
 	"ca-scraper/shared/config"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
+	"ca-scraper/shared/notifications"
+	"log"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"go.uber.org/zap"
 )
 
 func startHeartbeat(appLogger *logger.Logger) {
 	go func() {
-		for {
-			appLogger.Info("Program is running... waiting for transactions.")
-			time.Sleep(8 * time.Minute)
+		ticker := time.NewTicker(8 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			appLogger.Info("Heartbeat: Program running...")
 		}
 	}()
 }
@@ -30,83 +31,112 @@ func startHeartbeat(appLogger *logger.Logger) {
 func main() {
 	defer func() {
 		if r := recover(); r != nil {
-			panicMsg := fmt.Sprintf("Program crashed with panic: %v", r)
-			println(panicMsg)
+			log.Panicf("FATAL PANIC RECOVERY: %v", r)
 		}
 	}()
 
 	if err := godotenv.Load(".env"); err != nil {
-		println(".env file NOT found in the current directory.")
+		log.Println("INFO: .env file not found or failed to load.")
 	} else {
-		println(".env file successfully loaded.")
+		log.Println("INFO: .env file loaded successfully.")
 	}
 
 	if err := env.LoadEnv(); err != nil {
-		println("Failed to load environment variables:", err.Error())
-		return
+		log.Fatalf("FATAL: Failed to load environment variables: %v", err)
 	}
+	log.Println("INFO: Environment variables loaded via shared/env.")
 
-	appLogger, err := logger.NewLogger("production", true)
-	if err != nil {
-		println("Failed to initialize logger:", err.Error())
-		return
-	}
-	println("Logger initialized successfully.")
-
-	addressList := strings.Split(env.RaydiumAccountAddresses, ",")
-	if env.PumpFunAuthority != "" {
-		addressList = append(addressList, env.PumpFunAuthority)
-		println("Added Pump.fun Authority Address:", env.PumpFunAuthority)
+	log.Println("INFO: Initializing Telegram notifications...")
+	if err := notifications.InitTelegramBot(); err != nil {
+		log.Printf("WARN: Failed to initialize Telegram Bot, proceeding without Telegram features: %v", err)
 	} else {
-		appLogger.Info("PUMPFUN_AUTHORITY_ADDRESS is missing. Pump.fun graduations may not be tracked.")
+		log.Println("INFO: Telegram notifications initialized (if enabled and configured).")
 	}
-	println("Final Address List for Webhook:", strings.Join(addressList, ", "))
 
+	log.Println("INFO: Initializing application logger...")
+	appEnv := "production"
+	enableTelegramLogging := env.TelegramBotToken != "" && env.TelegramGroupID != 0
+
+	loggerCfg := logger.Config{
+		Environment:         appEnv,
+		EnableTelegram:      enableTelegramLogging,
+		SystemLogsThreadID:  env.SystemLogsThreadID,
+		ScannerLogsThreadID: env.ScannerLogsThreadID,
+	}
+	appLogger, err := logger.NewLogger(loggerCfg)
+	if err != nil {
+		log.Fatalf("FATAL: Failed to initialize logger: %v", err)
+	}
+	appLogger.Info("Application logger initialized successfully.")
+
+	appLogger.Info("Loading application configuration...")
 	cfg, err := config.LoadConfig("agent/config.yaml")
 	if err != nil {
-		appLogger.Error("Failed to load configuration: " + err.Error())
-		return
+		appLogger.Fatal("Failed to load agent/config.yaml", zap.Error(err))
 	}
 	config.SetGlobalConfig(cfg)
+	appLogger.Info("Application configuration loaded.")
 
-	println("Initializing Telegram Bot...")
+	appLogger.Info("Initializing Telegram Bot command listener...")
 	if err := bot.InitializeBot(appLogger); err != nil {
-		appLogger.Error("Failed to initialize Telegram Bot: " + err.Error())
-		return
-	}
-
-	println("Checking and creating Webhook (if necessary)...")
-	if !services.CreateHeliusWebhook(env.WebhookURL) {
-		appLogger.Error("Webhook creation failed")
-		return
-	}
-
-	found, err := services.CheckExistingHeliusWebhook(env.WebhookURL)
-	if err != nil {
-		appLogger.Warn("Failed to check existing webhook status", "error", err)
-	} else if !found {
-		appLogger.Error("Webhook verification failed")
-		return
+		appLogger.Error("Failed to initialize Telegram Bot listener", zap.Error(err))
 	} else {
-		appLogger.Info("Webhook existence confirmed.")
+		appLogger.Info("Telegram Bot command listener initialized.")
 	}
 
+	appLogger.Info("Setting up Helius webhooks...")
+	graduationWebhookURL := env.WebhookURL
+	if graduationWebhookURL != "" {
+		appLogger.Info("Attempting to set up Graduation webhook", zap.String("url", graduationWebhookURL))
+		if err := services.SetupGraduationWebhook(graduationWebhookURL, appLogger); err != nil {
+			appLogger.Error("Failed to set up Graduation webhook", zap.Error(err))
+		} else {
+			found, checkErr := services.CheckExistingHeliusWebhook(graduationWebhookURL, appLogger)
+			if checkErr != nil {
+				appLogger.Warn("Failed to check existing Graduation webhook status", zap.Error(checkErr))
+			} else if !found {
+				appLogger.Error("Graduation webhook verification failed after setup attempt.")
+			} else {
+				appLogger.Info("Graduation webhook existence confirmed.")
+			}
+		}
+	} else {
+		appLogger.Warn("WEBHOOK_LISTENER_URL_DEV/PROD not set, skipping Graduation webhook setup.")
+	}
+	appLogger.Info("Setting up web server routes...")
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
-	router.Use(cors.Default())
 
-	handlers.RegisterRoutes(router, appLogger.ZapLogger, appLogger)
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowOrigins = []string{"*"}
+	corsConfig.AllowMethods = []string{"GET", "POST", "OPTIONS"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
+	router.Use(cors.New(corsConfig))
+
+	handlers.RegisterRoutes(router, appLogger)
+	appLogger.Info("Web server routes registered.")
+
+	appLogger.Info("Starting background services...")
+	go services.CheckTokenProgress(appLogger)
+	go services.ValidateAndNotifyCachedSwaps(appLogger)
+	go services.CleanSwapCachePeriodically(appLogger)
+	appLogger.Info("Background services started.")
 
 	go func() {
-		println("Server running on http://localhost:" + env.Port)
-		if err := router.Run(":" + env.Port); err != nil {
-			appLogger.Error("Could not start server: " + err.Error())
+		serverAddr := ":" + env.Port
+		appLogger.Info("Starting web server", zap.String("address", serverAddr))
+		if err := router.Run(serverAddr); err != nil {
+			appLogger.Fatal("Could not start web server", zap.Error(err))
 		}
 	}()
 
-	tests.RunStartupTests()
+	appLogger.Info("Running startup tests...")
+	tests.RunStartupTests(appLogger)
+	appLogger.Info("Startup tests completed.")
 
+	appLogger.Info("Starting heartbeat monitor.")
 	startHeartbeat(appLogger)
 
+	appLogger.Info("Application startup complete. Waiting for events...")
 	select {}
 }
