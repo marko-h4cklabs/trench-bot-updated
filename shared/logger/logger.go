@@ -33,21 +33,17 @@ func NewLogger(cfg Config) (*Logger, error) {
 	if cfg.Environment == "production" {
 		zapCfg = zap.NewProductionConfig()
 		zapCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		zapCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+		zapCfg.Development = false
+		zapCfg.DisableStacktrace = false
 	} else {
 		zapCfg = zap.NewDevelopmentConfig()
 		zapCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	}
-	zapCfg.DisableCaller = false
-
-	if cfg.Environment == "production" {
-		zapCfg.Development = false
-		zapCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-		zapCfg.DisableStacktrace = false
-	} else {
-		zapCfg.Development = true
 		zapCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+		zapCfg.Development = true
 		zapCfg.DisableStacktrace = true
 	}
+	zapCfg.DisableCaller = false
 
 	zapCoreLogger, err = zapCfg.Build(zap.AddCallerSkip(1))
 	if err != nil {
@@ -71,23 +67,29 @@ func NewLogger(cfg Config) (*Logger, error) {
 	}, nil
 }
 
-func formatKeyValuesSimple(keysAndValues ...interface{}) string {
+func formatAndEscapeKeyValues(keysAndValues ...interface{}) string {
+	if len(keysAndValues)%2 != 0 {
+		keysAndValues = append(keysAndValues, "INVALID_ARGS")
+	}
 	if len(keysAndValues) == 0 {
 		return ""
 	}
+
 	var sb strings.Builder
 	sb.WriteString(" |")
+
 	for i := 0; i < len(keysAndValues); i += 2 {
 		keyStr := fmt.Sprintf("%v", keysAndValues[i])
-		valStr := "MISSING_VALUE"
-		if i+1 < len(keysAndValues) {
-			if err, ok := keysAndValues[i+1].(error); ok {
-				valStr = err.Error()
-			} else {
-				valStr = fmt.Sprintf("%v", keysAndValues[i+1])
-			}
+		var valStr string
+		if err, ok := keysAndValues[i+1].(error); ok {
+			valStr = err.Error()
+		} else {
+			valStr = fmt.Sprintf("%v", keysAndValues[i+1])
 		}
-		sb.WriteString(fmt.Sprintf(" %s=`%s`", keyStr, notifications.EscapeMarkdownV2(valStr)))
+
+		escapedKey := notifications.EscapeMarkdownV2(keyStr)
+		escapedValue := notifications.EscapeMarkdownV2(valStr)
+		sb.WriteString(fmt.Sprintf(" %s=`%s`", escapedKey, escapedValue))
 	}
 	return sb.String()
 }
@@ -98,16 +100,20 @@ func (l *Logger) Info(msg string, keysAndValues ...interface{}) {
 
 func (l *Logger) Warn(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Warnw(msg, keysAndValues...)
-	if l.enableTelegram {
-		formattedMsg := fmt.Sprintf(" *WARN:* %s%s", notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+	if l.enableTelegram && l.systemLogsThreadID != 0 {
+		escapedMsg := notifications.EscapeMarkdownV2(msg)
+		formattedKeyValues := formatAndEscapeKeyValues(keysAndValues...)
+		formattedMsg := fmt.Sprintf("🟡 *WARN:* %s%s", escapedMsg, formattedKeyValues)
 		notifications.SendSystemLogMessage(formattedMsg)
 	}
 }
 
 func (l *Logger) Error(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Errorw(msg, keysAndValues...)
-	if l.enableTelegram {
-		formattedMsg := fmt.Sprintf("‼ *ERROR:* %s%s", notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+	if l.enableTelegram && l.systemLogsThreadID != 0 {
+		escapedMsg := notifications.EscapeMarkdownV2(msg)
+		formattedKeyValues := formatAndEscapeKeyValues(keysAndValues...)
+		formattedMsg := fmt.Sprintf("🔴 *ERROR:* %s%s", escapedMsg, formattedKeyValues)
 		notifications.SendSystemLogMessage(formattedMsg)
 	}
 }
@@ -117,8 +123,10 @@ func (l *Logger) Debug(msg string, keysAndValues ...interface{}) {
 }
 
 func (l *Logger) Fatal(msg string, keysAndValues ...interface{}) {
-	if l.enableTelegram {
-		formattedMsg := fmt.Sprintf(" *FATAL:* %s%s", notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+	if l.enableTelegram && l.systemLogsThreadID != 0 {
+		escapedMsg := notifications.EscapeMarkdownV2(msg)
+		formattedKeyValues := formatAndEscapeKeyValues(keysAndValues...)
+		formattedMsg := fmt.Sprintf("💀 *FATAL:* %s%s", escapedMsg, formattedKeyValues)
 		notifications.SendSystemLogMessage(formattedMsg)
 		time.Sleep(1 * time.Second)
 	}
@@ -141,23 +149,28 @@ func (l *Logger) LogToScanner(level zapcore.Level, msg string, keysAndValues ...
 	zapFunc(msg, keysAndValues...)
 
 	if l.enableTelegram && l.scannerLogsThreadID != 0 && level >= zapcore.InfoLevel {
-		prefix := "[Scanner] "
+		escapedMsg := notifications.EscapeMarkdownV2(msg)
+		formattedKeyValues := formatAndEscapeKeyValues(keysAndValues...)
+		var prefix string
+
 		switch level {
 		case zapcore.InfoLevel:
-			prefix += "ℹ INFO: "
+			prefix = "ℹ️ [Scanner] INFO: "
 		case zapcore.WarnLevel:
-			prefix += " *WARN:* "
+			prefix = "🟡 [Scanner] *WARN:* "
 		case zapcore.ErrorLevel:
-			prefix += "‼ *ERROR:* "
+			prefix = "🔴 [Scanner] *ERROR:* "
 		case zapcore.FatalLevel:
-			prefix += " *FATAL:* "
-			formattedMsg := fmt.Sprintf("%s%s%s", prefix, notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+			prefix = "💀 [Scanner] *FATAL:* "
+			formattedMsg := fmt.Sprintf("%s%s%s", prefix, escapedMsg, formattedKeyValues)
 			notifications.SendScannerLogMessage(formattedMsg)
 			time.Sleep(1 * time.Second)
 			return
+		default:
+			prefix = "[Scanner] "
 		}
 
-		formattedMsg := fmt.Sprintf("%s%s%s", prefix, notifications.EscapeMarkdownV2(msg), formatKeyValuesSimple(keysAndValues...))
+		formattedMsg := fmt.Sprintf("%s%s%s", prefix, escapedMsg, formattedKeyValues)
 		notifications.SendScannerLogMessage(formattedMsg)
 	}
 }

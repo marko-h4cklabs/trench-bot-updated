@@ -54,72 +54,98 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	webhookSecret := env.WebhookSecret
 	authHeader := env.HeliusAuthHeader
 	pumpFunAuthority := env.PumpFunAuthority
+	raydiumAddressesStr := env.RaydiumAccountAddresses
 
 	if apiKey == "" {
-		appLogger.Fatal("HELIUS_API_KEY missing!")
+		appLogger.Error("HELIUS_API_KEY missing! Cannot set up webhook.")
 		return fmt.Errorf("missing HELIUS_API_KEY")
+	}
+	if webhookURL == "" {
+		appLogger.Error("Webhook URL is empty! Cannot set up webhook.")
+		return fmt.Errorf("webhookURL provided is empty")
 	}
 	if pumpFunAuthority == "" {
 		appLogger.Warn("PUMPFUN_AUTHORITY_ADDRESS missing!")
 	}
+	if raydiumAddressesStr == "" {
+		appLogger.Warn("RAYDIUM_ACCOUNT_ADDRESSES missing or empty!")
+	}
 	if webhookSecret == "" {
-		appLogger.Warn("WEBHOOK_SECRET missing!")
+		appLogger.Warn("WEBHOOK_SECRET missing! Authorization might fail if required.")
 	}
 	if authHeader == "" {
-		appLogger.Info("HELIUS_AUTH_HEADER empty.")
+		appLogger.Info("HELIUS_AUTH_HEADER is not set (this is often optional).")
+	}
+	addressesToMonitor := []string{}
+	if pumpFunAuthority != "" {
+		addressesToMonitor = append(addressesToMonitor, pumpFunAuthority)
+		appLogger.Info("Adding PumpFun authority address to webhook monitor list.", zap.String("address", pumpFunAuthority))
 	}
 
-	appLogger.Info("Checking for existing Graduation Helius Webhook...")
+	if raydiumAddressesStr != "" {
+		parsedRaydiumAddrs := strings.Split(raydiumAddressesStr, ",")
+		count := 0
+		for _, addr := range parsedRaydiumAddrs {
+			trimmedAddr := strings.TrimSpace(addr)
+			if trimmedAddr != "" {
+				addressesToMonitor = append(addressesToMonitor, trimmedAddr)
+				count++
+			}
+		}
+		appLogger.Info("Adding Raydium addresses to webhook monitor list.", zap.Int("count", count))
+	}
+
+	if len(addressesToMonitor) == 0 {
+		appLogger.Error("Cannot create webhook: No addresses found to monitor (neither PUMPFUN_AUTHORITY_ADDRESS nor RAYDIUM_ACCOUNT_ADDRESSES provided/valid).")
+		return fmt.Errorf("no addresses provided to monitor")
+	}
+	appLogger.Info("Total addresses to monitor in webhook", zap.Int("count", len(addressesToMonitor)))
+
+	appLogger.Info("Checking for existing Helius Webhook for the specific URL...")
 	existingWebhook, err := CheckExistingHeliusWebhook(webhookURL, appLogger)
 	if err != nil {
-		appLogger.Error("Failed check for existing graduation webhook, attempting creation regardless.", zap.Error(err))
+		appLogger.Error("Failed check for existing webhook, attempting creation regardless.", zap.Error(err))
 	}
 	if existingWebhook {
-		appLogger.Info("Graduation webhook already exists.", zap.String("url", webhookURL))
+		appLogger.Info("Webhook already exists for this URL. Skipping creation.", zap.String("url", webhookURL))
+		appLogger.Warn("Existing webhook check passed, but address list might not be updated. Manual check/update via Helius dashboard or API recommended if addresses changed.")
 		return nil
 	}
 
-	appLogger.Info("Creating new graduation webhook...")
+	appLogger.Info("Creating new Helius webhook...")
 	requestBody := WebhookRequest{
 		WebhookURL:       webhookURL,
 		TransactionTypes: []string{"TRANSFER", "SWAP"},
-		AccountAddresses: []string{pumpFunAuthority},
+		AccountAddresses: addressesToMonitor,
 		WebhookType:      "enhanced",
 		AuthHeader:       authHeader,
 	}
 
-	if pumpFunAuthority == "" {
-		appLogger.Error("Cannot create graduation webhook without PUMPFUN_AUTHORITY_ADDRESS.")
-		return fmt.Errorf("PUMPFUN_AUTHORITY_ADDRESS is required for graduation webhook")
-	}
-
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
-		appLogger.Error("Failed to serialize graduation webhook request", zap.Error(err))
-		return err
+		appLogger.Error("Failed to serialize webhook request body", zap.Error(err))
+		return fmt.Errorf("failed to serialize webhook request: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.helius.xyz/v0/webhooks?api-key=%s", apiKey)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
+	apiURL := fmt.Sprintf("https://api.helius.xyz/v0/webhooks?api-key=%s", apiKey)
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		appLogger.Error("Failed to create graduation webhook request object", zap.Error(err))
-		return err
+		appLogger.Error("Failed to create webhook request object", zap.Error(err))
+		return fmt.Errorf("failed to create webhook request object: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-
 	if webhookSecret != "" {
-		req.Header.Set("Authorization", "Bearer "+webhookSecret)
-		appLogger.Info("Using Authorization Bearer token for Helius graduation webhook creation.")
+		appLogger.Info("Sending Helius API key via query parameter.")
 	} else {
-		appLogger.Warn("WEBHOOK_SECRET missing. Helius graduation webhook creation might fail if authentication is required.")
+		appLogger.Warn("WEBHOOK_SECRET is missing. Ensure API key in URL is sufficient for authentication.")
 	}
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		appLogger.Error("Failed to send graduation webhook request", zap.Error(err))
-		return err
+		appLogger.Error("Failed to send webhook creation request to Helius", zap.Error(err))
+		return fmt.Errorf("failed to send webhook creation request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -128,17 +154,20 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	if readErr == nil {
 		responseBodyStr = string(body)
 	} else {
-		appLogger.Warn("Failed to read graduation webhook creation response body", zap.Error(readErr))
+		appLogger.Warn("Failed to read webhook creation response body", zap.Error(readErr))
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		appLogger.Info("Graduation webhook created successfully", zap.String("url", webhookURL), zap.Int("status", resp.StatusCode))
+		appLogger.Info("Helius webhook created successfully",
+			zap.String("url", webhookURL),
+			zap.Int("status", resp.StatusCode),
+			zap.Int("monitored_address_count", len(addressesToMonitor)))
 		return nil
 	} else {
-		appLogger.Error("Failed to create graduation webhook.",
+		appLogger.Error("Failed to create Helius webhook.",
 			zap.Int("status", resp.StatusCode),
 			zap.String("response", responseBodyStr))
-		return fmt.Errorf("failed to create graduation webhook: status %d, response body: %s", resp.StatusCode, responseBodyStr)
+		return fmt.Errorf("failed to create helius webhook: status %d, response body: %s", resp.StatusCode, responseBodyStr)
 	}
 }
 
