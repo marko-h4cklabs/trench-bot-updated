@@ -395,78 +395,74 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 	for range ticker.C {
 		appLogger.Debug("Running token progress check cycle...")
 
-		// Create a snapshot of tokens to check to minimize lock duration
 		tokensToCheck := make(map[string]TrackedTokenInfo)
 		trackedProgressCache.Lock()
 		for addr, info := range trackedProgressCache.Data {
 			tokensToCheck[addr] = info
 		}
-		trackedProgressCache.Unlock() // Release lock before making API calls
+		trackedProgressCache.Unlock()
 
 		count := len(tokensToCheck)
 		if count == 0 {
 			appLogger.Debug("No tokens currently in progress tracking cache.")
-			continue // Skip cycle if nothing to check
+			continue
 		}
 
 		appLogger.Info("Checking progress for tracked tokens", zap.Int("count", count))
 
-		tokensToRemove := []string{} // Collect tokens that hit the target
+		tokensToRemove := []string{}
 
 		for tokenAddress, trackedInfo := range tokensToCheck {
 			tokenField := zap.String("tokenAddress", tokenAddress)
 			baselineMarketCap := trackedInfo.BaselineMarketCap
 			mcBaselineField := zap.Float64("baselineMC", baselineMarketCap)
 
-			// Safety check - shouldn't happen if added correctly, but good practice
 			if baselineMarketCap <= 0 {
 				appLogger.Warn("Token found in progress cache with zero or negative baseline MC, removing.", tokenField, mcBaselineField)
-				tokensToRemove = append(tokensToRemove, tokenAddress) // Mark for removal
+				tokensToRemove = append(tokensToRemove, tokenAddress)
 				continue
 			}
 
 			appLogger.Debug("Checking progress for specific token", tokenField, mcBaselineField)
 
-			// Reuse IsTokenValid to get current data, including market cap
-			// This automatically handles retries and rate limiting via DexScreener service
 			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger)
 
 			if err != nil {
-				// Log error but don't remove immediately, could be temporary (like rate limit)
 				appLogger.Warn("Error fetching current data during progress check", tokenField, zap.Error(err))
-				// Consider adding logic here: if error persists for multiple cycles, remove the token?
-				continue // Skip to next token on error
+				continue
 			}
 
-			// Check if we got a valid result and current market cap
 			if currentValidationResult != nil && currentValidationResult.MarketCap > 0 {
 				currentMarketCap := currentValidationResult.MarketCap
 				mcCurrentField := zap.Float64("currentMC", currentMarketCap)
-
-				// Calculate the multiplier
 				multiplier := currentMarketCap / baselineMarketCap
 
 				appLogger.Debug("Progress check calculation", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier))
 
-				// Check if the target multiplier is met
 				if multiplier >= targetMultiplier {
-					// Round down to the nearest whole number for the message (e.g., 4.8x becomes 4x)
 					roundedMultiplier := math.Floor(multiplier)
 
 					appLogger.Info("Token hit target market cap multiplier!", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier), zap.Float64("roundedMultiplier", roundedMultiplier))
 
+					// *** CHANGE HERE: Generate raw link first ***
+					dexScreenerLinkRaw := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
+
+					// *** CHANGE HERE: Format the message WITHOUT internal escaping ***
+					// Use intended markdown like *, `, \! directly.
 					progressMessage := fmt.Sprintf(
-						"🚀 Token `%s` did *%.0fx* from initial call\\!\n\n"+ // Use %.0f for whole number X
-							"Initial MC: `$%.0f`\n"+
-							"Current MC: `$%.0f`\n\n"+
-							"DexScreener: %s",
+						"🚀 Token `%s` did *%.0fx* from initial call\\!\n\n"+ // Keep manual escapes for !, *, `
+							"Initial MC: `$%.0f`\n"+ // Keep manual escapes for `
+							"Current MC: `$%.0f`\n\n"+ // Keep manual escapes for `
+							"DexScreener: %s", // Use the raw link string here
 						tokenAddress,
 						roundedMultiplier,
 						baselineMarketCap,
 						currentMarketCap,
-						notifications.EscapeMarkdownV2(fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)),
+						dexScreenerLinkRaw, // Pass the raw link
 					)
 
+					// *** NO CHANGE HERE: Send the raw formatted message ***
+					// Escaping will happen inside SendTrackingUpdateMessage
 					notifications.SendTrackingUpdateMessage(progressMessage)
 					appLogger.Info("Sent tracking update notification", tokenField)
 
@@ -479,9 +475,9 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 				appLogger.Debug("Token progress check: Current market cap is zero or validation result missing.", tokenField, zap.Bool("hasResult", currentValidationResult != nil))
 			}
 
-			time.Sleep(150 * time.Millisecond)
-
+			time.Sleep(150 * time.Millisecond) // Keep the small delay
 		}
+
 		if len(tokensToRemove) > 0 {
 			trackedProgressCache.Lock()
 			for _, addr := range tokensToRemove {

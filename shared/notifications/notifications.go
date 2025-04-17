@@ -129,7 +129,9 @@ func SendBotCallMessage(message string) {
 		log.Println("WARN: Attempted to send to Bot Calls topic, but BOT_CALLS_THREAD_ID is not set.")
 		return
 	}
-	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, message, false, "")
+	// Escape the entire message right before sending
+	escapedMessage := EscapeMarkdownV2(message)
+	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedMessage, false, "")
 }
 
 func SendBotCallPhotoMessage(photoURL string, caption string) {
@@ -137,25 +139,30 @@ func SendBotCallPhotoMessage(photoURL string, caption string) {
 		log.Println("WARN: Attempted to send photo to Bot Calls topic, but BOT_CALLS_THREAD_ID is not set.")
 		return
 	}
+
+	// Escape the caption right before sending
+	escapedCaption := EscapeMarkdownV2(caption)
+
 	// Basic URL validation
 	if _, err := url.ParseRequestURI(photoURL); err != nil {
 		log.Printf("ERROR: Invalid photo URL provided for Bot Call: %s - %v. Falling back to sending caption as text.", photoURL, err)
-		// Fallback to text message if URL is bad
-		coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, caption, false, "")
+		// Fallback to text message if URL is bad - use the already escaped caption
+		coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedCaption, false, "")
 		return
 	}
-	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, caption, true, photoURL)
+	// Send photo with the escaped caption
+	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedCaption, true, photoURL)
 }
 
 // *** NEW: Function to send messages to the Tracking topic ***
 func SendTrackingUpdateMessage(message string) {
 	if env.TrackingThreadID == 0 {
 		log.Println("WARN: Attempted to send to Tracking topic, but TRACKING_THREAD_ID is not set.")
-		// Decide: Should this be a fatal error, or just a log? Log is safer.
 		return
 	}
-	// Send as a standard text message using the core function
-	coreSendMessageWithRetry(defaultGroupID, env.TrackingThreadID, message, false, "")
+	// Escape the entire message right before sending
+	escapedMessage := EscapeMarkdownV2(message)
+	coreSendMessageWithRetry(defaultGroupID, env.TrackingThreadID, escapedMessage, false, "")
 }
 
 // --- coreSendMessageWithRetry (unchanged) ---
@@ -359,6 +366,7 @@ func EscapeMarkdownV2(s string) string {
 	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	temp := s
 	for _, char := range charsToEscape {
+		// IMPORTANT: Ensure replacement is done correctly. Using ReplaceAll is fine.
 		temp = strings.ReplaceAll(temp, char, "\\"+char)
 	}
 	return temp
