@@ -161,8 +161,13 @@ func SendTrackingUpdateMessage(message string) {
 		log.Println("WARN: Attempted to send to Tracking topic, but TRACKING_THREAD_ID is not set.")
 		return
 	}
-	// Escape the entire message right before sending
+
+	// --- Add Debug Logs ---
+	log.Printf("DEBUG [Tracking]: Original Message: [%s]", message)
 	escapedMessage := EscapeMarkdownV2(message)
+	log.Printf("DEBUG [Tracking]: Escaped Message: [%s]", escapedMessage)
+	// --- End Debug Logs ---
+
 	coreSendMessageWithRetry(defaultGroupID, env.TrackingThreadID, escapedMessage, false, "")
 }
 
@@ -364,7 +369,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 // --- EscapeMarkdownV2 (unchanged) ---
 func EscapeMarkdownV2(s string) string {
 	// Characters to escape in Telegram MarkdownV2
-	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Make sure '!' is here
+	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // '.' MUST be in this list
 	temp := s
 	for _, char := range charsToEscape {
 		temp = strings.ReplaceAll(temp, char, "\\"+char)
