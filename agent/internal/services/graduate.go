@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math" // <-- Import math package
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,16 +19,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// NEW: Struct to hold tracked token info including baseline market cap
 type TrackedTokenInfo struct {
 	BaselineMarketCap float64
 	AddedAt           time.Time
 }
 
+// NEW: Cache for tokens being tracked for progress
 var trackedProgressCache = struct {
 	sync.Mutex
-	Data map[string]TrackedTokenInfo
+	Data map[string]TrackedTokenInfo // Map CA -> TrackedTokenInfo
 }{Data: make(map[string]TrackedTokenInfo)}
 
+// --- Existing variables ---
 type WebhookRequest struct {
 	WebhookURL       string   `json:"webhookURL"`
 	TransactionTypes []string `json:"transactionTypes"`
@@ -47,7 +51,9 @@ var tokenCache = struct {
 	Tokens map[string]time.Time
 }{Tokens: make(map[string]time.Time)}
 
+// --- Existing SetupGraduationWebhook function (unchanged) ---
 func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
+	// ... (existing code remains the same) ...
 	appLogger.Info("Setting up Graduation Webhook...", zap.String("url", webhookURL))
 
 	apiKey := env.HeliusAPIKey
@@ -171,7 +177,9 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	}
 }
 
+// --- Existing HandleWebhook function (unchanged) ---
 func HandleWebhook(payload []byte, appLogger *logger.Logger) {
+	// ... (existing code remains the same) ...
 	appLogger.Debug("Received Graduation Webhook Payload", zap.Int("size", len(payload)))
 	if len(payload) == 0 {
 		appLogger.Error("Empty graduation webhook payload received!")
@@ -197,6 +205,7 @@ func HandleWebhook(payload []byte, appLogger *logger.Logger) {
 	processGraduatedToken(event, appLogger)
 }
 
+// --- Modified processGraduatedToken function ---
 func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) {
 	appLogger.Debug("Processing single graduation event")
 
@@ -210,6 +219,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
+	// Debounce check
 	tokenCache.Lock()
 	if _, exists := tokenCache.Tokens[tokenAddress]; exists {
 		tokenCache.Unlock()
@@ -220,10 +230,12 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	tokenCache.Unlock()
 	appLogger.Info("Added token to graduation processing debounce cache", tokenField)
 
+	// Validate against DexScreener
 	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger)
 
 	if validationErr != nil {
 		appLogger.Error("Error checking DexScreener criteria for graduated token", tokenField, zap.Error(validationErr))
+		// Clean up debounce cache on error? Maybe not, let it expire naturally or succeed on retry
 		return
 	}
 
@@ -235,13 +247,16 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 			reason = "Did not meet criteria (no specific reasons returned)"
 		}
 		appLogger.Info("Graduated token failed DexScreener criteria", tokenField, zap.String("reason", reason))
+		// Clean up debounce cache on failure? Maybe not.
 		return
 	}
 
+	// --- Token PASSED validation ---
 	appLogger.Info("Graduated token passed validation! Preparing notification...", tokenField)
 
 	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
 
+	// Format criteria details
 	criteriaDetails := fmt.Sprintf(
 		"🩸 Liquidity: `$%.0f`\n"+
 			"🏛️ Market Cap: `$%.0f`\n"+
@@ -257,8 +272,10 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		validationResult.Txns1h,
 	)
 
+	// Format social links
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
+	// ... (existing social link building code remains the same) ...
 	if validationResult.WebsiteURL != "" {
 		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", notifications.EscapeMarkdownV2(validationResult.WebsiteURL)))
 		hasSocials = true
@@ -273,11 +290,12 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	}
 	for name, url := range validationResult.OtherSocials {
 		if url != "" {
-			emoji := "🔗"
+			emoji := "🔗" // Default emoji
 			lowerName := strings.ToLower(name)
 			if strings.Contains(lowerName, "discord") {
-				emoji = "<:discord:10014198 discord icon emoji ID>"
+				emoji = "<:discord:10014198 discord icon emoji ID>" // Replace with actual emoji or ID if needed
 			}
+			// Add more specific emojis if desired
 			if strings.Contains(lowerName, "medium") {
 				emoji = "📰"
 			}
@@ -291,6 +309,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		socialsSection = "\\-\\-\\- Socials \\-\\-\\-\n" + socialLinksBuilder.String()
 	}
 
+	// Check icon status
 	var iconStatus string
 	usePhoto := false
 	if validationResult.ImageURL != "" {
@@ -300,13 +319,14 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		} else {
 			appLogger.Warn("Invalid ImageURL format received from DexScreener", tokenField, zap.String("url", validationResult.ImageURL))
 			iconStatus = "⚠️ Icon URL Invalid"
-			usePhoto = false
+			usePhoto = false // Fallback to text if URL is bad
 		}
 	} else {
 		iconStatus = "❌ Icon Missing"
 		usePhoto = false
 	}
 
+	// Format main message caption
 	caption := fmt.Sprintf(
 		"*Token Graduated & Validated\\!* 🚀\n\n"+
 			"CA: `%s`\n"+
@@ -314,15 +334,16 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 			"DexScreener: %s\n\n"+
 			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
 			"%s\n\n"+
-			"%s",
+			"%s", // Socials section already includes newline if present
 		tokenAddress,
 		iconStatus,
 		dexscreenerURLEsc,
 		criteriaDetails,
-		socialsSection,
+		socialsSection, // Add the built socials string
 	)
-	caption = strings.TrimRight(caption, "\n")
+	caption = strings.TrimRight(caption, "\n") // Clean up trailing newline
 
+	// Send notification to "bot calls" topic
 	if usePhoto {
 		notifications.SendBotCallPhotoMessage(validationResult.ImageURL, caption)
 		appLogger.Info("Telegram 'Bot Call' photo notification initiated", tokenField)
@@ -331,79 +352,116 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Info("Telegram 'Bot Call' text notification initiated", tokenField)
 	}
 
+	// Add to graduated cache (prevents immediate re-processing if webhook fires again)
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
 	appLogger.Info("Added token to graduatedTokenCache", tokenField)
 
+	// *** NEW: Add token to the progress tracking cache ***
 	if validationResult.MarketCap > 0 {
 		mcField := zap.Float64("baselineMC", validationResult.MarketCap)
 		trackedProgressCache.Lock()
-		trackedProgressCache.Data[tokenAddress] = TrackedTokenInfo{
-			BaselineMarketCap: validationResult.MarketCap,
-			AddedAt:           time.Now(),
+		// Only add if not already being tracked (safety check, though unlikely)
+		if _, exists := trackedProgressCache.Data[tokenAddress]; !exists {
+			trackedProgressCache.Data[tokenAddress] = TrackedTokenInfo{
+				BaselineMarketCap: validationResult.MarketCap,
+				AddedAt:           time.Now(),
+			}
+			trackedProgressCache.Unlock()
+			appLogger.Info("Added token to progress tracking cache", tokenField, mcField)
+		} else {
+			trackedProgressCache.Unlock()
+			appLogger.Info("Token already exists in progress tracking cache, skipping add.", tokenField, mcField)
 		}
-		trackedProgressCache.Unlock()
-		appLogger.Info("Added token to progress tracking cache", tokenField, mcField)
 	} else {
+		// Don't add if market cap is zero, as it breaks multiplier calculation
 		appLogger.Info("Token not added to progress tracking (Market Cap is zero)", tokenField)
 	}
 }
 
+// *** NEW: Function to periodically check token progress ***
 func CheckTokenProgress(appLogger *logger.Logger) {
-	checkInterval := 10 * time.Minute
-	appLogger.Info("Token progress tracking routine started", zap.Duration("interval", checkInterval))
+	checkInterval := 30 * time.Minute // Check every 30 minutes
+	targetMultiplier := 4.0           // Target multiplier (e.g., 4x)
+
+	appLogger.Info("Token progress tracking routine started",
+		zap.Duration("interval", checkInterval),
+		zap.Float64("targetMultiplier", targetMultiplier))
+
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		appLogger.Debug("Running token progress check cycle...")
 
+		// Create a snapshot of tokens to check to minimize lock duration
 		tokensToCheck := make(map[string]TrackedTokenInfo)
 		trackedProgressCache.Lock()
 		for addr, info := range trackedProgressCache.Data {
 			tokensToCheck[addr] = info
 		}
-		trackedProgressCache.Unlock()
+		trackedProgressCache.Unlock() // Release lock before making API calls
 
 		count := len(tokensToCheck)
-		if count > 0 {
-			appLogger.Info("Checking progress for tokens", zap.Int("count", count))
-		} else {
+		if count == 0 {
 			appLogger.Debug("No tokens currently in progress tracking cache.")
-			continue
+			continue // Skip cycle if nothing to check
 		}
 
-		tokensToRemove := []string{}
+		appLogger.Info("Checking progress for tracked tokens", zap.Int("count", count))
+
+		tokensToRemove := []string{} // Collect tokens that hit the target
 
 		for tokenAddress, trackedInfo := range tokensToCheck {
 			tokenField := zap.String("tokenAddress", tokenAddress)
-			appLogger.Debug("Checking specific token progress", tokenField)
+			baselineMarketCap := trackedInfo.BaselineMarketCap
+			mcBaselineField := zap.Float64("baselineMC", baselineMarketCap)
 
-			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger)
-
-			if err != nil {
-				appLogger.Warn("Error fetching current data during progress check", tokenField, zap.Error(err))
+			// Safety check - shouldn't happen if added correctly, but good practice
+			if baselineMarketCap <= 0 {
+				appLogger.Warn("Token found in progress cache with zero or negative baseline MC, removing.", tokenField, mcBaselineField)
+				tokensToRemove = append(tokensToRemove, tokenAddress) // Mark for removal
 				continue
 			}
 
-			if currentValidationResult != nil && currentValidationResult.MarketCap > 0 && trackedInfo.BaselineMarketCap > 0 {
-				currentMarketCap := currentValidationResult.MarketCap
-				baselineMarketCap := trackedInfo.BaselineMarketCap
-				mcBaselineField := zap.Float64("baselineMC", baselineMarketCap)
-				mcCurrentField := zap.Float64("currentMC", currentMarketCap)
-				multiplier := 2.0
+			appLogger.Debug("Checking progress for specific token", tokenField, mcBaselineField)
 
-				if currentMarketCap >= (baselineMarketCap * multiplier) {
-					appLogger.Info("Token hit target market cap multiplier!", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier))
+			// Reuse IsTokenValid to get current data, including market cap
+			// This automatically handles retries and rate limiting via DexScreener service
+			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger)
+
+			if err != nil {
+				// Log error but don't remove immediately, could be temporary (like rate limit)
+				appLogger.Warn("Error fetching current data during progress check", tokenField, zap.Error(err))
+				// Consider adding logic here: if error persists for multiple cycles, remove the token?
+				continue // Skip to next token on error
+			}
+
+			// Check if we got a valid result and current market cap
+			if currentValidationResult != nil && currentValidationResult.MarketCap > 0 {
+				currentMarketCap := currentValidationResult.MarketCap
+				mcCurrentField := zap.Float64("currentMC", currentMarketCap)
+
+				// Calculate the multiplier
+				multiplier := currentMarketCap / baselineMarketCap
+
+				appLogger.Debug("Progress check calculation", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier))
+
+				// Check if the target multiplier is met
+				if multiplier >= targetMultiplier {
+					// Round down to the nearest whole number for the message (e.g., 4.8x becomes 4x)
+					roundedMultiplier := math.Floor(multiplier)
+
+					appLogger.Info("Token hit target market cap multiplier!", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier), zap.Float64("roundedMultiplier", roundedMultiplier))
 
 					progressMessage := fmt.Sprintf(
-						"🚀 Token `%s` just did *%.1fx* from verification\\!\n\n"+
+						"🚀 Token `%s` did *%.0fx* from initial call\\!\n\n"+ // Use %.0f for whole number X
 							"Initial MC: `$%.0f`\n"+
 							"Current MC: `$%.0f`\n\n"+
 							"DexScreener: %s",
 						tokenAddress,
-						currentMarketCap/baselineMarketCap,
+						roundedMultiplier,
 						baselineMarketCap,
 						currentMarketCap,
 						notifications.EscapeMarkdownV2(fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)),
@@ -415,21 +473,24 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 					tokensToRemove = append(tokensToRemove, tokenAddress)
 
 				} else {
-					appLogger.Debug("Token progress check: Target condition not met.", tokenField, mcBaselineField, mcCurrentField)
+					appLogger.Debug("Token progress check: Target multiplier not met.", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier))
 				}
 			} else {
-				appLogger.Debug("Token progress check: Market cap is zero, baseline missing, or validation result nil.", tokenField, zap.Bool("hasResult", currentValidationResult != nil))
+				appLogger.Debug("Token progress check: Current market cap is zero or validation result missing.", tokenField, zap.Bool("hasResult", currentValidationResult != nil))
 			}
-			time.Sleep(100 * time.Millisecond)
+
+			time.Sleep(150 * time.Millisecond)
+
 		}
 		if len(tokensToRemove) > 0 {
 			trackedProgressCache.Lock()
 			for _, addr := range tokensToRemove {
 				delete(trackedProgressCache.Data, addr)
-				appLogger.Info("Removed token from progress tracking cache", zap.String("tokenAddress", addr), zap.String("reason", "hit_target"))
+				appLogger.Info("Removed token from progress tracking cache after hitting target", zap.String("tokenAddress", addr))
 			}
 			trackedProgressCache.Unlock()
 		}
+
 		appLogger.Debug("Token progress check cycle finished.")
 	}
 }
