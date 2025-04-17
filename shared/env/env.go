@@ -84,7 +84,6 @@ func LoadEnv() error {
 	HeliusAuthHeader = loadEnvVariable("HELIUS_AUTH_HEADER", false)
 	PumpFunAuthority = loadEnvVariable("PUMPFUN_AUTHORITY_ADDRESS", true)
 
-	RaydiumWebhookURL = loadEnvVariable("RAYDIUM_WEBHOOK_URL", false)
 	RaydiumAccountAddresses = loadEnvVariable("RAYDIUM_ACCOUNT_ADDRESSES", false)
 
 	Port = loadEnvVariable("PORT", false)
