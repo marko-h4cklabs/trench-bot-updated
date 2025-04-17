@@ -140,17 +140,18 @@ func SendBotCallPhotoMessage(photoURL string, caption string) {
 		return
 	}
 
-	// Escape the caption right before sending
+	// *** THIS IS THE CRITICAL LINE ***
+	// Escape the entire caption right before sending or falling back
 	escapedCaption := EscapeMarkdownV2(caption)
 
 	// Basic URL validation
 	if _, err := url.ParseRequestURI(photoURL); err != nil {
 		log.Printf("ERROR: Invalid photo URL provided for Bot Call: %s - %v. Falling back to sending caption as text.", photoURL, err)
-		// Fallback to text message if URL is bad - use the already escaped caption
+		// Fallback uses the *escaped* caption
 		coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedCaption, false, "")
 		return
 	}
-	// Send photo with the escaped caption
+	// Send photo uses the *escaped* caption
 	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedCaption, true, photoURL)
 }
 
@@ -363,10 +364,9 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 // --- EscapeMarkdownV2 (unchanged) ---
 func EscapeMarkdownV2(s string) string {
 	// Characters to escape in Telegram MarkdownV2
-	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Make sure '!' is here
 	temp := s
 	for _, char := range charsToEscape {
-		// IMPORTANT: Ensure replacement is done correctly. Using ReplaceAll is fine.
 		temp = strings.ReplaceAll(temp, char, "\\"+char)
 	}
 	return temp
