@@ -108,8 +108,9 @@ func GetBotInstance() *tgbotapi.BotAPI {
 }
 
 // --- Existing Send functions (SendTelegramMessage, SendSystemLogMessage, etc.) unchanged ---
-func SendTelegramMessage(message string) { // Example, others are similar
-	coreSendMessageWithRetry(defaultGroupID, env.SystemLogsThreadID, message, false, "")
+func SendTelegramMessage(message string) {
+	escaped := EscapeMarkdownV2(message)
+	coreSendMessageWithRetry(defaultGroupID, env.SystemLogsThreadID, escaped, false, "")
 }
 
 func SendSystemLogMessage(message string) {
@@ -129,7 +130,7 @@ func SendBotCallMessage(message string) {
 		log.Println("WARN: Attempted to send to Bot Calls topic, but BOT_CALLS_THREAD_ID is not set.")
 		return
 	}
-	// Escape the entire message right before sending
+	// >>> THIS LINE MUST BE PRESENT <<<
 	escapedMessage := EscapeMarkdownV2(message)
 	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedMessage, false, "")
 }
@@ -368,8 +369,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 
 // --- EscapeMarkdownV2 (unchanged) ---
 func EscapeMarkdownV2(s string) string {
-	// Characters to escape in Telegram MarkdownV2
-	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // '.' MUST be in this list
+	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Ensure '!' is here
 	temp := s
 	for _, char := range charsToEscape {
 		temp = strings.ReplaceAll(temp, char, "\\"+char)
