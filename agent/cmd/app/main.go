@@ -67,10 +67,8 @@ func main() {
 	enableTelegramLogging := env.TelegramBotToken != "" && env.TelegramGroupID != 0
 
 	loggerCfg := logger.Config{
-		Environment:         appEnv,
-		EnableTelegram:      enableTelegramLogging,
-		SystemLogsThreadID:  env.SystemLogsThreadID,
-		ScannerLogsThreadID: env.ScannerLogsThreadID,
+		Environment:    appEnv,
+		EnableTelegram: enableTelegramLogging,
 	}
 	appLogger, err := logger.NewLogger(loggerCfg)
 	if err != nil {

@@ -9,13 +9,10 @@ import (
 )
 
 var (
-	TelegramBotToken    string
-	TelegramGroupID     int64
-	SystemLogsThreadID  int
-	ScannerLogsThreadID int
-	PotentialCAThreadID int
-	BotCallsThreadID    int
-	TrackingThreadID    int
+	TelegramBotToken string
+	TelegramGroupID  int64
+	BotCallsThreadID int
+	TrackingThreadID int
 
 	HeliusAPIKey     string
 	WebhookURL       string
@@ -79,7 +76,17 @@ func LoadEnv() error {
 
 	TelegramBotToken = loadEnvVariable("TELEGRAM_BOT_TOKEN", false)
 	HeliusAPIKey = loadEnvVariable("HELIUS_API_KEY", true)
-	WebhookURL = loadEnvVariable("WEBHOOK_LISTENER_URL_PROD", true)
+
+	// Determine which Webhook URL to use (Dev or Prod)
+	// Trying PROD first, then fallback to DEV if PROD is not set
+	WebhookURL = os.Getenv("WEBHOOK_LISTENER_URL_PROD")
+	if WebhookURL == "" {
+		log.Println("INFO: WEBHOOK_LISTENER_URL_PROD not set, trying WEBHOOK_LISTENER_URL_DEV.")
+		WebhookURL = loadEnvVariable("WEBHOOK_LISTENER_URL_DEV", true) // Require at least one
+	} else {
+		log.Println("INFO: Using WEBHOOK_LISTENER_URL_PROD.")
+	}
+
 	WebhookSecret = loadEnvVariable("WEBHOOK_SECRET", false)
 	HeliusAuthHeader = loadEnvVariable("HELIUS_AUTH_HEADER", false)
 	PumpFunAuthority = loadEnvVariable("PUMPFUN_AUTHORITY_ADDRESS", true)
@@ -93,9 +100,6 @@ func LoadEnv() error {
 	}
 
 	TelegramGroupID = int64(loadIntEnv("TELEGRAM_GROUP_ID", true, true))
-	SystemLogsThreadID = loadIntEnv("SYSTEM_LOGS_THREAD_ID", false, false)
-	ScannerLogsThreadID = loadIntEnv("SCANNER_LOGS_THREAD_ID", false, false)
-	PotentialCAThreadID = loadIntEnv("POTENTIAL_CA_THREAD_ID", false, false)
 
 	BotCallsThreadID = loadIntEnv("BOT_CALLS_THREAD_ID", true, false)
 	TrackingThreadID = loadIntEnv("TRACKING_THREAD_ID", true, false)
@@ -104,7 +108,7 @@ func LoadEnv() error {
 		log.Println("WARN: TELEGRAM_BOT_TOKEN is set, but TELEGRAM_GROUP_ID is missing or invalid.")
 	}
 	if WebhookURL == "" {
-		log.Println("WARN: WEBHOOK_LISTENER_URL_PROD (or DEV) is not set. Webhooks will not function.")
+		log.Println("WARN: Neither WEBHOOK_LISTENER_URL_PROD nor WEBHOOK_LISTENER_URL_DEV is set. Webhooks will not function.")
 	}
 
 	if TelegramBotToken != "" && BotCallsThreadID == 0 {

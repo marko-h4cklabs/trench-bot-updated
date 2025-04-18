@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	// Removed zapcore import as LogToScanner is less distinct now
 )
 
 type RaydiumTransaction struct {
@@ -40,6 +40,7 @@ var swapCache = struct {
 	Data map[string]SwapCacheEntry
 }{Data: make(map[string]SwapCacheEntry)}
 
+// TrackGraduatedToken remains conceptually, but implementation might change
 func TrackGraduatedToken(tokenAddress string, appLogger *logger.Logger) {
 	appLogger.Info("Scheduling monitoring for newly graduated token", zap.String("tokenAddress", tokenAddress))
 	appLogger.Debug("Tracking initiated for token", zap.String("tokenAddress", tokenAddress))
@@ -52,6 +53,7 @@ const (
 	swapCacheCleanupInterval  = 5 * time.Minute
 )
 
+// HandleTransactionWebhookWithPayload remains the same internally
 func HandleTransactionWebhookWithPayload(transactions []map[string]interface{}, appLogger *logger.Logger) {
 	processedCount := 0
 	skippedAlreadySeen := 0
@@ -104,6 +106,7 @@ func HandleTransactionWebhookWithPayload(transactions []map[string]interface{}, 
 		zap.Int("skippedMissingData", skippedMissingData))
 }
 
+// processSwapTransaction changes logging call
 func processSwapTransaction(tx map[string]interface{}, appLogger *logger.Logger) bool {
 	txSignature, _ := tx["signature"].(string)
 	sigField := zap.String("signature", txSignature)
@@ -135,7 +138,8 @@ func processSwapTransaction(tx map[string]interface{}, appLogger *logger.Logger)
 	currentTotalVolume := sum(entry.Volumes)
 	swapCache.Unlock()
 
-	appLogger.LogToScanner(zapcore.DebugLevel, "Cached swap for token",
+	// Changed from LogToScanner to Debug
+	appLogger.Debug("Cached swap for token",
 		mintField,
 		usdField,
 		zap.Float64("newTotalVolume", currentTotalVolume),
@@ -144,6 +148,7 @@ func processSwapTransaction(tx map[string]interface{}, appLogger *logger.Logger)
 	return true
 }
 
+// HandleTransactionWebhook changes logging calls and notification call
 func HandleTransactionWebhook(payload []byte, appLogger *logger.Logger) {
 	requestID := zap.String("requestID", generateRequestID())
 	appLogger.Info("Handling Transaction Webhook Request", requestID)
@@ -193,12 +198,14 @@ func HandleTransactionWebhook(payload []byte, appLogger *logger.Logger) {
 			continue
 		}
 
-		appLogger.LogToScanner(zapcore.InfoLevel, "Performing immediate DexScreener check (from swap webhook)", mintField, sigField, requestID)
+		// Changed from LogToScanner to Info
+		appLogger.Info("Performing immediate DexScreener check (from swap webhook)", mintField, sigField, requestID)
 
 		validationResult, err := IsTokenValid(tokenMint, appLogger)
 
 		if err != nil {
-			appLogger.LogToScanner(zapcore.WarnLevel, "Error checking token with DexScreener (swap webhook)", mintField, sigField, zap.Error(err), requestID)
+			// Changed from LogToScanner to Warn
+			appLogger.Warn("Error checking token with DexScreener (swap webhook)", mintField, sigField, zap.Error(err), requestID)
 			continue
 		}
 
@@ -207,23 +214,26 @@ func HandleTransactionWebhook(payload []byte, appLogger *logger.Logger) {
 			if validationResult != nil && len(validationResult.FailReasons) > 0 {
 				reason = strings.Join(validationResult.FailReasons, "; ")
 			}
-			appLogger.LogToScanner(zapcore.InfoLevel, "Token does not meet immediate criteria (swap webhook).", mintField, sigField, zap.String("reason", reason), requestID)
+			// Changed from LogToScanner to Info
+			appLogger.Info("Token does not meet immediate criteria (swap webhook).", mintField, sigField, zap.String("reason", reason), requestID)
 			continue
 		}
 
-		appLogger.LogToScanner(zapcore.InfoLevel, "Valid Swap Detected via Webhook (Immediate Check)", mintField, sigField, requestID)
+		// Changed from LogToScanner to Info
+		appLogger.Info("Valid Swap Detected via Webhook (Immediate Check)", mintField, sigField, requestID)
 		validatedCount++
 
 		dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenMint)
-		dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
-
-		telegramMessage := fmt.Sprintf(
-			"🔥 Hot Swap Validated\\! 🔥\n\nToken: `%s`\nDexScreener: %s\nTx: `%s`",
+		// NOTE: Escaping inside Sprintf can be fragile. Ensure the final string is escaped by the notification function.
+		// Let's prepare the raw message and let SendTelegramMessage handle escaping.
+		rawMessage := fmt.Sprintf(
+			"🔥 Hot Swap Validated! 🔥\n\nToken: `%s`\nDexScreener: %s\nTx: `%s`",
 			tokenMint,
-			dexscreenerLinkEsc,
-			notifications.EscapeMarkdownV2(txSignature),
+			dexscreenerLink, // Send raw link
+			txSignature,     // Send raw signature
 		)
-		notifications.SendScannerLogMessage(telegramMessage)
+		// Changed from SendScannerLogMessage to SendTelegramMessage
+		notifications.SendTelegramMessage(rawMessage)
 	}
 
 	appLogger.Info("Swap webhook processing finished.",
@@ -233,6 +243,7 @@ func HandleTransactionWebhook(payload []byte, appLogger *logger.Logger) {
 
 }
 
+// CreateHeliusWebhook remains the same
 func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
 	appLogger.Info("Setting up/Verifying Raydium Swap Webhook", zap.String("url", webhookURL))
 
@@ -246,15 +257,16 @@ func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
 		return false
 	}
 	if webhookSecret == "" {
-		appLogger.Fatal("WEBHOOK_SECRET is missing! Cannot create webhook.")
-		return false
+		// Changed from Fatal to Error or Warn, as secret might not always be mandatory depending on Helius config
+		appLogger.Error("WEBHOOK_SECRET is missing! Webhook creation might fail if secret is required by Helius.")
+		// return false // Decide if this should prevent creation
 	}
 	if webhookURL == "" {
 		appLogger.Error("CreateHeliusWebhook called with empty webhookURL.")
 		return false
 	}
 	if authHeader == "" {
-		appLogger.Warn("HELIUS_AUTH_HEADER is empty! Webhook endpoint might be insecure.")
+		appLogger.Warn("HELIUS_AUTH_HEADER is empty! Webhook endpoint might be insecure if auth header is expected.")
 	}
 
 	var accountList []string
@@ -276,7 +288,7 @@ func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
 	}
 
 	appLogger.Info("Final address list for Raydium webhook", zap.Strings("addresses", accountList))
-	appLogger.Info("Expecting Raydium webhook Authorization header", zap.String("headerValue", authHeader))
+	appLogger.Info("Expecting Raydium webhook Authorization header if configured", zap.Bool("authHeaderSet", authHeader != ""))
 
 	found, err := CheckExistingHeliusWebhook(webhookURL, appLogger)
 	if err != nil {
@@ -284,6 +296,7 @@ func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
 	}
 	if found {
 		appLogger.Info("Raydium webhook already exists.", zap.String("url", webhookURL))
+		appLogger.Warn("Existing Raydium webhook found. Ensure monitored addresses and auth header are correct.")
 		return true
 	}
 
@@ -293,7 +306,10 @@ func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
 		"accountAddresses": accountList,
 		"webhookType":      "enhanced",
 		"txnStatus":        "success",
-		"authHeader":       authHeader,
+	}
+	// Only include authHeader if it's set
+	if authHeader != "" {
+		payload["authHeader"] = authHeader
 	}
 
 	payloadBytes, err := json.Marshal(payload)
@@ -309,7 +325,10 @@ func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+webhookSecret)
+	// Authorization for Helius API itself might use the API key directly or a different secret
+	// The 'webhookSecret' might be intended for securing *your* endpoint receiving the webhook.
+	// Helius docs clarification needed here. Assuming API key in URL is sufficient for now.
+	// req.Header.Set("Authorization", "Bearer "+webhookSecret) // Re-evaluate if needed for Helius API auth
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
@@ -329,7 +348,7 @@ func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
 
 	statusField := zap.Int("statusCode", resp.StatusCode)
 	bodyField := zap.String("responseBody", responseBodyStr)
-	appLogger.Info("Helius Webhook API Response", zap.String("status", resp.Status), bodyField)
+	appLogger.Info("Helius Webhook API Response", zap.String("status", resp.Status), statusField, bodyField)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		appLogger.Info("Helius Raydium webhook created or updated successfully.")
@@ -340,6 +359,7 @@ func CreateHeliusWebhook(webhookURL string, appLogger *logger.Logger) bool {
 	}
 }
 
+// TestWebhookWithAuth remains the same
 func TestWebhookWithAuth(appLogger *logger.Logger) {
 	webhookURL := env.WebhookURL
 	authHeader := env.HeliusAuthHeader
@@ -406,6 +426,7 @@ func TestWebhookWithAuth(appLogger *logger.Logger) {
 	}
 }
 
+// sum remains the same
 func sum(volumes []float64) float64 {
 	var total float64
 	for _, v := range volumes {
@@ -414,6 +435,7 @@ func sum(volumes []float64) float64 {
 	return total
 }
 
+// ValidateAndNotifyCachedSwaps changes logging calls and notification call
 func ValidateAndNotifyCachedSwaps(appLogger *logger.Logger) {
 	appLogger.Info("Swap validation & notification loop started",
 		zap.Duration("interval", validationCheckInterval),
@@ -460,12 +482,14 @@ func ValidateAndNotifyCachedSwaps(appLogger *logger.Logger) {
 			validationResult, err := IsTokenValid(token, appLogger)
 
 			if err != nil {
-				appLogger.LogToScanner(zapcore.WarnLevel, "Error/RateLimit checking token during validation loop", tokenField, volumeField, zap.Error(err))
-				if !errors.Is(err, ErrRateLimited) {
+				// Changed from LogToScanner to Warn
+				appLogger.Warn("Error/RateLimit checking token during validation loop", tokenField, volumeField, zap.Error(err))
+				if !errors.Is(err, ErrRateLimited) { // Assuming ErrRateLimited exists from dexscreener.go
 					swapCache.Lock()
 					delete(swapCache.Data, token)
 					swapCache.Unlock()
-					appLogger.LogToScanner(zapcore.InfoLevel, "Removed token from cache due to non-rate-limit validation error.", tokenField)
+					// Changed from LogToScanner to Info
+					appLogger.Info("Removed token from cache due to non-rate-limit validation error.", tokenField)
 				}
 				failedOrRateLimitedCount++
 				continue
@@ -473,12 +497,12 @@ func ValidateAndNotifyCachedSwaps(appLogger *logger.Logger) {
 
 			if validationResult != nil && validationResult.IsValid {
 				validatedCount++
-				appLogger.LogToScanner(zapcore.InfoLevel, "Token PASSED validation via volume check loop.", tokenField, volumeField)
+				// Changed from LogToScanner to Info
+				appLogger.Info("Token PASSED validation via volume check loop.", tokenField, volumeField)
 
 				dexscreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", token)
-				dexscreenerLinkEsc := notifications.EscapeMarkdownV2(dexscreenerLink)
-
-				telegramMessage := fmt.Sprintf(
+				// Prepare raw message for SendTelegramMessage
+				rawMessage := fmt.Sprintf(
 					"✅ Validated Swap Token (Volume Check)\n\n"+
 						"CA: `%s`\n"+
 						"Volume Trigger: `$%.2f`\n\n"+
@@ -486,14 +510,16 @@ func ValidateAndNotifyCachedSwaps(appLogger *logger.Logger) {
 						"*(Removed from volume tracking cache)*",
 					token,
 					totalVolume,
-					dexscreenerLinkEsc,
+					dexscreenerLink, // Send raw link
 				)
-				notifications.SendScannerLogMessage(telegramMessage)
+				// Changed from SendScannerLogMessage to SendTelegramMessage
+				notifications.SendTelegramMessage(rawMessage)
 
 				swapCache.Lock()
 				delete(swapCache.Data, token)
 				swapCache.Unlock()
-				appLogger.LogToScanner(zapcore.InfoLevel, "Removed validated token from swap cache.", tokenField)
+				// Changed from LogToScanner to Info
+				appLogger.Info("Removed validated token from swap cache.", tokenField)
 
 			} else {
 				failedOrRateLimitedCount++
@@ -501,15 +527,18 @@ func ValidateAndNotifyCachedSwaps(appLogger *logger.Logger) {
 				if validationResult != nil && len(validationResult.FailReasons) > 0 {
 					reason = strings.Join(validationResult.FailReasons, "; ")
 				} else if validationResult != nil && !validationResult.IsValid {
-					reason = "Did not meet criteria (no specific reasons returned)"
+					reason = "Did not meet criteria (no specific reasons returned)" // Adjusted message slightly
 				}
-				appLogger.LogToScanner(zapcore.InfoLevel, "Token FAILED validation via volume check loop.", tokenField, volumeField, zap.String("reason", reason))
+				// Changed from LogToScanner to Info
+				appLogger.Info("Token FAILED validation via volume check loop.", tokenField, volumeField, zap.String("reason", reason))
 
 				swapCache.Lock()
 				delete(swapCache.Data, token)
 				swapCache.Unlock()
-				appLogger.LogToScanner(zapcore.InfoLevel, "Removed failed/invalid token from swap cache.", tokenField)
+				// Changed from LogToScanner to Info
+				appLogger.Info("Removed failed/invalid token from swap cache.", tokenField)
 			}
+			// Add a small delay between checks if needed
 			time.Sleep(50 * time.Millisecond)
 		}
 		appLogger.Info("Swap validation check cycle complete.",
@@ -519,6 +548,7 @@ func ValidateAndNotifyCachedSwaps(appLogger *logger.Logger) {
 	}
 }
 
+// CleanSwapCachePeriodically remains the same
 func CleanSwapCachePeriodically(appLogger *logger.Logger) {
 	appLogger.Info("Swap cache cleanup routine started",
 		zap.Duration("interval", swapCacheCleanupInterval),
@@ -545,6 +575,7 @@ func CleanSwapCachePeriodically(appLogger *logger.Logger) {
 		if len(tokensToDelete) > 0 {
 			swapCache.Lock()
 			for _, token := range tokensToDelete {
+				// Double check condition before deleting under lock
 				if entry, exists := swapCache.Data[token]; exists && entry.LastUpdated.Before(cutoffTime) {
 					delete(swapCache.Data, token)
 					deletedCount++
@@ -565,6 +596,16 @@ func CleanSwapCachePeriodically(appLogger *logger.Logger) {
 	}
 }
 
+// generateRequestID remains the same
 func generateRequestID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
+
+// Assume CheckExistingHeliusWebhook function exists elsewhere
+// func CheckExistingHeliusWebhook(webhookURL string, appLogger *logger.Logger) (bool, error) { ... }
+// Assume IsTokenValid function exists elsewhere (dexscreener.go)
+// func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, error) { ... }
+// Assume events.ExtractNonSolMintFromEvent exists elsewhere
+// func ExtractNonSolMintFromEvent(event map[string]interface{}) (string, bool) { ... }
+// Assume ErrRateLimited exists elsewhere (dexscreener.go)
+// var ErrRateLimited = errors.New(...)

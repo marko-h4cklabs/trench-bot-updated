@@ -12,17 +12,13 @@ import (
 )
 
 type Config struct {
-	Environment         string
-	EnableTelegram      bool
-	SystemLogsThreadID  int
-	ScannerLogsThreadID int
+	Environment    string
+	EnableTelegram bool
 }
 
 type Logger struct {
-	ZapLogger           *zap.SugaredLogger
-	enableTelegram      bool
-	systemLogsThreadID  int
-	scannerLogsThreadID int
+	ZapLogger      *zap.SugaredLogger
+	enableTelegram bool
 }
 
 func NewLogger(cfg Config) (*Logger, error) {
@@ -53,17 +49,14 @@ func NewLogger(cfg Config) (*Logger, error) {
 	zapSugaredLogger := zapCoreLogger.Sugar()
 
 	if cfg.EnableTelegram {
-		zapSugaredLogger.Infof("Logger initialized. Telegram logging integration ENABLED (System Thread: %d, Scanner Thread: %d)",
-			cfg.SystemLogsThreadID, cfg.ScannerLogsThreadID)
+		zapSugaredLogger.Info("Logger initialized. Telegram logging integration ENABLED (sending important logs to main chat).")
 	} else {
 		zapSugaredLogger.Info("Logger initialized. Telegram logging integration DISABLED.")
 	}
 
 	return &Logger{
-		ZapLogger:           zapSugaredLogger,
-		enableTelegram:      cfg.EnableTelegram,
-		systemLogsThreadID:  cfg.SystemLogsThreadID,
-		scannerLogsThreadID: cfg.ScannerLogsThreadID,
+		ZapLogger:      zapSugaredLogger,
+		enableTelegram: cfg.EnableTelegram,
 	}, nil
 }
 
@@ -100,21 +93,21 @@ func (l *Logger) Info(msg string, keysAndValues ...interface{}) {
 
 func (l *Logger) Warn(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Warnw(msg, keysAndValues...)
-	if l.enableTelegram && l.systemLogsThreadID != 0 {
+	if l.enableTelegram {
 		escapedMsg := notifications.EscapeMarkdownV2(msg)
 		formattedKeyValues := formatAndEscapeKeyValues(keysAndValues...)
 		formattedMsg := fmt.Sprintf("🟡 *WARN:* %s%s", escapedMsg, formattedKeyValues)
-		notifications.SendSystemLogMessage(formattedMsg)
+		notifications.SendTelegramMessage(formattedMsg)
 	}
 }
 
 func (l *Logger) Error(msg string, keysAndValues ...interface{}) {
 	l.ZapLogger.Errorw(msg, keysAndValues...)
-	if l.enableTelegram && l.systemLogsThreadID != 0 {
+	if l.enableTelegram {
 		escapedMsg := notifications.EscapeMarkdownV2(msg)
 		formattedKeyValues := formatAndEscapeKeyValues(keysAndValues...)
 		formattedMsg := fmt.Sprintf("🔴 *ERROR:* %s%s", escapedMsg, formattedKeyValues)
-		notifications.SendSystemLogMessage(formattedMsg)
+		notifications.SendTelegramMessage(formattedMsg)
 	}
 }
 
@@ -123,11 +116,11 @@ func (l *Logger) Debug(msg string, keysAndValues ...interface{}) {
 }
 
 func (l *Logger) Fatal(msg string, keysAndValues ...interface{}) {
-	if l.enableTelegram && l.systemLogsThreadID != 0 {
+	if l.enableTelegram {
 		escapedMsg := notifications.EscapeMarkdownV2(msg)
 		formattedKeyValues := formatAndEscapeKeyValues(keysAndValues...)
 		formattedMsg := fmt.Sprintf("💀 *FATAL:* %s%s", escapedMsg, formattedKeyValues)
-		notifications.SendSystemLogMessage(formattedMsg)
+		notifications.SendTelegramMessage(formattedMsg)
 		time.Sleep(1 * time.Second)
 	}
 	l.ZapLogger.Fatalw(msg, keysAndValues...)
@@ -148,7 +141,7 @@ func (l *Logger) LogToScanner(level zapcore.Level, msg string, keysAndValues ...
 
 	zapFunc(msg, keysAndValues...)
 
-	if l.enableTelegram && l.scannerLogsThreadID != 0 && level >= zapcore.InfoLevel {
+	if l.enableTelegram && level >= zapcore.InfoLevel {
 		escapedMsg := notifications.EscapeMarkdownV2(msg)
 		formattedKeyValues := formatAndEscapeKeyValues(keysAndValues...)
 		var prefix string
@@ -163,7 +156,7 @@ func (l *Logger) LogToScanner(level zapcore.Level, msg string, keysAndValues ...
 		case zapcore.FatalLevel:
 			prefix = "💀 [Scanner] *FATAL:* "
 			formattedMsg := fmt.Sprintf("%s%s%s", prefix, escapedMsg, formattedKeyValues)
-			notifications.SendScannerLogMessage(formattedMsg)
+			notifications.SendTelegramMessage(formattedMsg)
 			time.Sleep(1 * time.Second)
 			return
 		default:
@@ -171,7 +164,7 @@ func (l *Logger) LogToScanner(level zapcore.Level, msg string, keysAndValues ...
 		}
 
 		formattedMsg := fmt.Sprintf("%s%s%s", prefix, escapedMsg, formattedKeyValues)
-		notifications.SendScannerLogMessage(formattedMsg)
+		notifications.SendTelegramMessage(formattedMsg)
 	}
 }
 
