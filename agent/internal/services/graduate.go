@@ -20,8 +20,9 @@ import (
 )
 
 type TrackedTokenInfo struct {
-	BaselineMarketCap float64
-	AddedAt           time.Time
+	BaselineMarketCap           float64
+	AddedAt                     time.Time
+	LastNotifiedMultiplierLevel int
 }
 
 var trackedProgressCache = struct {
@@ -357,8 +358,9 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		trackedProgressCache.Lock()
 		if _, exists := trackedProgressCache.Data[tokenAddress]; !exists {
 			trackedProgressCache.Data[tokenAddress] = TrackedTokenInfo{
-				BaselineMarketCap: validationResult.MarketCap,
-				AddedAt:           time.Now(),
+				BaselineMarketCap:           validationResult.MarketCap,
+				AddedAt:                     time.Now(),
+				LastNotifiedMultiplierLevel: 0, // Initialize notification level to 0
 			}
 			trackedProgressCache.Unlock()
 			appLogger.Info("Added token to progress tracking cache", tokenField, mcField)
@@ -373,12 +375,11 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 }
 
 func CheckTokenProgress(appLogger *logger.Logger) {
-	checkInterval := 30 * time.Minute
-	targetMultiplier := 4.0
+	checkInterval := 15 * time.Minute // Keep the 30-minute check interval
 
 	appLogger.Info("Token progress tracking routine started",
 		zap.Duration("interval", checkInterval),
-		zap.Float64("targetMultiplier", targetMultiplier))
+		zap.String("notificationTrigger", "Every 2x multiple of initial MC"))
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
@@ -386,6 +387,7 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 	for range ticker.C {
 		appLogger.Debug("Running token progress check cycle...")
 
+		// Create a snapshot to minimize lock time
 		tokensToCheck := make(map[string]TrackedTokenInfo)
 		trackedProgressCache.Lock()
 		for addr, info := range trackedProgressCache.Data {
@@ -401,81 +403,114 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 
 		appLogger.Info("Checking progress for tracked tokens", zap.Int("count", count))
 
-		tokensToRemove := []string{}
+		// We need to update the cache, so prepare a map for updates
+		updatesToCache := make(map[string]int) // Map tokenAddress -> newLastNotifiedLevel
 
 		for tokenAddress, trackedInfo := range tokensToCheck {
 			tokenField := zap.String("tokenAddress", tokenAddress)
 			baselineMarketCap := trackedInfo.BaselineMarketCap
+			lastNotifiedLevel := trackedInfo.LastNotifiedMultiplierLevel // Get the last level notified
 			mcBaselineField := zap.Float64("baselineMC", baselineMarketCap)
+			lastLevelField := zap.Int("lastNotifiedLevel", lastNotifiedLevel)
 
 			if baselineMarketCap <= 0 {
-				appLogger.Warn("Token found in progress cache with zero or negative baseline MC, removing.", tokenField, mcBaselineField)
-				tokensToRemove = append(tokensToRemove, tokenAddress)
+				// This should ideally not happen if added correctly, but handle defensively
+				appLogger.Warn("Token found in progress cache with invalid baseline MC, consider removing.", tokenField, mcBaselineField)
+				// Maybe remove it here? For now, just skip.
+				// trackedProgressCache.Lock()
+				// delete(trackedProgressCache.Data, tokenAddress)
+				// trackedProgressCache.Unlock()
 				continue
 			}
 
-			appLogger.Debug("Checking progress for specific token", tokenField, mcBaselineField)
+			appLogger.Debug("Checking progress for specific token", tokenField, mcBaselineField, lastLevelField)
 
-			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger) // Assume exists
+			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger)
 
 			if err != nil {
 				appLogger.Warn("Error fetching current data during progress check", tokenField, zap.Error(err))
+				// Don't remove on temporary errors, just skip this cycle for this token
 				continue
 			}
 
+			// Check if we got a valid result and positive current market cap
 			if currentValidationResult != nil && currentValidationResult.MarketCap > 0 {
 				currentMarketCap := currentValidationResult.MarketCap
 				mcCurrentField := zap.Float64("currentMC", currentMarketCap)
+
+				// Calculate the actual multiplier
 				multiplier := currentMarketCap / baselineMarketCap
 
-				appLogger.Debug("Progress check calculation", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier))
+				// Determine the current 2x notification level achieved
+				// Floor(multiplier / 2) gives us how many full "doublings" occurred.
+				// E.g., 1.9x -> level 0; 2.1x -> level 1; 3.9x -> level 1; 4.0x -> level 2; 5.5x -> level 2
+				currentLevelFactor := int(math.Floor(multiplier / 2.0))
 
-				if multiplier >= targetMultiplier {
-					roundedMultiplier := math.Floor(multiplier)
+				// Calculate the 'X' multiplier to report (always an even number: 2, 4, 6...)
+				currentNotifyLevel := currentLevelFactor * 2
 
-					appLogger.Info("Token hit target market cap multiplier!", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier), zap.Float64("roundedMultiplier", roundedMultiplier))
+				levelFactorField := zap.Int("currentLevelFactor", currentLevelFactor)
+				notifyLevelField := zap.Int("currentNotifyLevel", currentNotifyLevel)
+				appLogger.Debug("Progress check calculation", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier), levelFactorField, notifyLevelField, lastLevelField)
 
-					// *** Use raw dexscreener link ***
+				// Check if the current notification level is higher than the last one we notified for
+				// AND ensure the level is at least 2 (meaning it hit 2x or more)
+				if currentNotifyLevel > lastNotifiedLevel && currentNotifyLevel >= 2 {
+					appLogger.Info("Token hit new notification level!", tokenField, mcBaselineField, mcCurrentField, notifyLevelField, lastLevelField)
+
 					dexScreenerLinkRaw := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
-					// *** Format raw message, use intended markdown, no escaping ***
+					// Format the progress update message using the currentNotifyLevel (e.g., 2x, 4x, 6x)
 					progressMessage := fmt.Sprintf(
-						"🚀 Token `%s` did *%.0fx* from initial call!\n\n"+ // Keep intended markdown *!
-							"Initial MC: `$%.0f`\n"+ // Keep intended markdown `$`
-							"Current MC: `$%.0f`\n\n"+ // Keep intended markdown `$`
-							"DexScreener: %s", // Pass raw URL
+						"🚀 Token `%s` did *%dx* from initial call!\n\n"+ // Use %d for integer X
+							"Initial MC: `$%.0f`\n"+
+							"Current MC: `$%.0f`\n\n"+
+							"DexScreener: %s",
 						tokenAddress,
-						roundedMultiplier,
+						currentNotifyLevel, // Use the calculated level (2, 4, 6...)
 						baselineMarketCap,
 						currentMarketCap,
-						dexScreenerLinkRaw, // Use raw URL
+						dexScreenerLinkRaw,
 					)
 
-					// *** Send raw message - notifications will escape ***
+					// Send notification - This function passes the raw message to core which handles escaping
 					notifications.SendTrackingUpdateMessage(progressMessage)
-					appLogger.Info("Sent tracking update notification", tokenField)
+					appLogger.Info("Sent tracking update notification", tokenField, notifyLevelField)
 
-					tokensToRemove = append(tokensToRemove, tokenAddress)
+					// Store the new level that we just notified for, to update the cache later
+					updatesToCache[tokenAddress] = currentNotifyLevel
 
 				} else {
-					appLogger.Debug("Token progress check: Target multiplier not met.", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier))
+					// Target level not met or not higher than last notification
+					appLogger.Debug("Token progress check: Notification condition not met.", tokenField, notifyLevelField, lastLevelField)
 				}
 			} else {
-				appLogger.Debug("Token progress check: Current market cap is zero or validation result missing.", tokenField, zap.Bool("hasResult", currentValidationResult != nil))
+				// Current market cap is zero or validation result was nil/invalid
+				appLogger.Debug("Token progress check: Current market cap is zero or validation result missing/invalid.", tokenField, zap.Bool("hasResult", currentValidationResult != nil))
+				// Consider removing if consistently invalid? For now, just ignore.
 			}
 
+			// Optional delay between tokens
 			time.Sleep(150 * time.Millisecond)
-		}
 
-		if len(tokensToRemove) > 0 {
+		} // End loop through tokensToCheck
+
+		// --- Update the cache with the new notified levels ---
+		if len(updatesToCache) > 0 {
 			trackedProgressCache.Lock()
-			for _, addr := range tokensToRemove {
-				delete(trackedProgressCache.Data, addr)
-				appLogger.Info("Removed token from progress tracking cache after hitting target", zap.String("tokenAddress", addr))
+			for tokenAddr, newLevel := range updatesToCache {
+				// Ensure the token still exists in the cache before updating
+				if info, ok := trackedProgressCache.Data[tokenAddr]; ok {
+					info.LastNotifiedMultiplierLevel = newLevel
+					trackedProgressCache.Data[tokenAddr] = info // Update the struct in the map
+					appLogger.Info("Updated last notified level in cache", zap.String("tokenAddress", tokenAddr), zap.Int("newLevel", newLevel))
+				} else {
+					appLogger.Warn("Attempted to update last notified level for token no longer in cache", zap.String("tokenAddress", tokenAddr))
+				}
 			}
 			trackedProgressCache.Unlock()
 		}
 
 		appLogger.Debug("Token progress check cycle finished.")
-	}
+	} // End ticker loop
 }
