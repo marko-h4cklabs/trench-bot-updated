@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math" // <-- Import math package
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,19 +19,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// NEW: Struct to hold tracked token info including baseline market cap
 type TrackedTokenInfo struct {
 	BaselineMarketCap float64
 	AddedAt           time.Time
 }
 
-// NEW: Cache for tokens being tracked for progress
 var trackedProgressCache = struct {
 	sync.Mutex
-	Data map[string]TrackedTokenInfo // Map CA -> TrackedTokenInfo
+	Data map[string]TrackedTokenInfo
 }{Data: make(map[string]TrackedTokenInfo)}
 
-// --- Existing variables ---
 type WebhookRequest struct {
 	WebhookURL       string   `json:"webhookURL"`
 	TransactionTypes []string `json:"transactionTypes"`
@@ -41,19 +38,22 @@ type WebhookRequest struct {
 	AuthHeader       string   `json:"authHeader"`
 }
 
-var graduatedTokenCache = struct {
-	sync.Mutex
-	Data map[string]time.Time
-}{Data: make(map[string]time.Time)}
-
 var tokenCache = struct {
 	sync.Mutex
 	Tokens map[string]time.Time
 }{Tokens: make(map[string]time.Time)}
 
-// --- Existing SetupGraduationWebhook function (unchanged) ---
+type GraduatedTokenCache struct {
+	Data map[string]time.Time
+	sync.Mutex
+}
+
+var graduatedTokenCache = &GraduatedTokenCache{Data: make(map[string]time.Time)}
+
+// Assume SetupGraduationWebhook, HandleWebhook, CheckExistingHeliusWebhook, IsTokenValid, events.ExtractNonSolMintFromEvent exist and are correct
+
 func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
-	// ... (existing code remains the same) ...
+	// ... (Keep existing implementation) ...
 	appLogger.Info("Setting up Graduation Webhook...", zap.String("url", webhookURL))
 
 	apiKey := env.HeliusAPIKey
@@ -108,7 +108,7 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	appLogger.Info("Total addresses to monitor in webhook", zap.Int("count", len(addressesToMonitor)))
 
 	appLogger.Info("Checking for existing Helius Webhook for the specific URL...")
-	existingWebhook, err := CheckExistingHeliusWebhook(webhookURL, appLogger)
+	existingWebhook, err := CheckExistingHeliusWebhook(webhookURL, appLogger) // Assume this exists
 	if err != nil {
 		appLogger.Error("Failed check for existing webhook, attempting creation regardless.", zap.Error(err))
 	}
@@ -142,7 +142,7 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 
 	req.Header.Set("Content-Type", "application/json")
 	if webhookSecret != "" {
-		appLogger.Info("Sending Helius API key via query parameter.")
+		appLogger.Info("Sending Helius API key via query parameter.") // Or however auth works
 	} else {
 		appLogger.Warn("WEBHOOK_SECRET is missing. Ensure API key in URL is sufficient for authentication.")
 	}
@@ -175,68 +175,69 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 			zap.String("response", responseBodyStr))
 		return fmt.Errorf("failed to create helius webhook: status %d, response body: %s", resp.StatusCode, responseBodyStr)
 	}
+	// return nil // Placeholder
 }
 
-// --- Existing HandleWebhook function (unchanged) ---
-func HandleWebhook(payload []byte, appLogger *logger.Logger) {
-	// ... (existing code remains the same) ...
+func HandleWebhook(payload []byte, appLogger *logger.Logger) error { // Return error for better handling upstream?
 	appLogger.Debug("Received Graduation Webhook Payload", zap.Int("size", len(payload)))
 	if len(payload) == 0 {
 		appLogger.Error("Empty graduation webhook payload received!")
-		return
+		return fmt.Errorf("empty payload received")
 	}
 
 	var eventsArray []map[string]interface{}
 	if err := json.Unmarshal(payload, &eventsArray); err == nil {
 		appLogger.Debug("Graduation webhook payload is an array.", zap.Int("count", len(eventsArray)))
+		var firstErr error
 		for i, event := range eventsArray {
 			appLogger.Debug("Processing graduation event from array", zap.Int("index", i))
-			processGraduatedToken(event, appLogger)
+			err := processGraduatedToken(event, appLogger) // Capture potential error from processor
+			if err != nil && firstErr == nil {
+				firstErr = err // Store the first error encountered
+			}
 		}
-		return
+		return firstErr // Return the first error, if any
 	}
 
+	// Try parsing as a single object if array parse failed
 	var event map[string]interface{}
 	if err := json.Unmarshal(payload, &event); err != nil {
 		appLogger.Error("Failed to parse graduation webhook payload (neither array nor object)", zap.Error(err), zap.String("payload", string(payload)))
-		return
+		return fmt.Errorf("failed to parse webhook payload: %w", err)
 	}
 	appLogger.Debug("Graduation webhook payload is a single event object. Processing...")
-	processGraduatedToken(event, appLogger)
+	return processGraduatedToken(event, appLogger) // Process and return potential error
 }
 
-// --- Modified processGraduatedToken function ---
-func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) {
+func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) error { // Return error
 	appLogger.Debug("Processing single graduation event")
 
 	tokenAddress, ok := events.ExtractNonSolMintFromEvent(event)
 	if !ok {
 		appLogger.Debug("Could not extract relevant non-SOL token from graduation event.")
-		return
+		return nil // Not an error, just not relevant
 	}
 	tokenField := zap.String("tokenAddress", tokenAddress)
 	appLogger.Debug("Extracted token address from graduation event", tokenField)
 
+	// *** No escaping here ***
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
-	// Debounce check
 	tokenCache.Lock()
 	if _, exists := tokenCache.Tokens[tokenAddress]; exists {
 		tokenCache.Unlock()
 		appLogger.Info("Token already processed recently (graduation debounce), skipping.", tokenField)
-		return
+		return nil // Not an error, just debounced
 	}
 	tokenCache.Tokens[tokenAddress] = time.Now()
 	tokenCache.Unlock()
 	appLogger.Info("Added token to graduation processing debounce cache", tokenField)
 
-	// Validate against DexScreener
 	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger)
 
 	if validationErr != nil {
 		appLogger.Error("Error checking DexScreener criteria for graduated token", tokenField, zap.Error(validationErr))
-		// Clean up debounce cache on error? Maybe not, let it expire naturally or succeed on retry
-		return
+		return validationErr // Propagate the error
 	}
 
 	if validationResult == nil || !validationResult.IsValid {
@@ -247,23 +248,19 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 			reason = "Did not meet criteria (no specific reasons returned)"
 		}
 		appLogger.Info("Graduated token failed DexScreener criteria", tokenField, zap.String("reason", reason))
-		// Clean up debounce cache on failure? Maybe not.
-		return
+		return nil // Not an error, just failed validation
 	}
 
-	// --- Token PASSED validation ---
 	appLogger.Info("Graduated token passed validation! Preparing notification...", tokenField)
 
-	dexscreenerURLEsc := notifications.EscapeMarkdownV2(dexscreenerURL)
-
-	// Format criteria details
+	// *** Format raw criteria details, no manual escaping ***
 	criteriaDetails := fmt.Sprintf(
-		"🩸 Liquidity: `$%.0f`\n"+
-			"🏛️ Market Cap: `$%.0f`\n"+
-			"⌛ \\(5m\\) Volume : `$%.0f`\n"+
-			"⏳ \\(1h\\) Volume : `$%.0f`\n"+
-			"🔎 \\(5m\\) TXNs : `%d`\n"+
-			"🔍 \\(1h\\) TXNs : `%d`",
+		"🩸 Liquidity: $%.0f\n"+
+			"🏛️ Market Cap: $%.0f\n"+
+			"⌛ (5m) Volume : $%.0f\n"+
+			"⏳ (1h) Volume : $%.0f\n"+
+			"🔎 (5m) TXNs : %d\n"+
+			"🔍 (1h) TXNs : %d",
 		validationResult.LiquidityUSD,
 		validationResult.MarketCap,
 		validationResult.Volume5m,
@@ -272,44 +269,42 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		validationResult.Txns1h,
 	)
 
-	// Format social links
+	// *** Format raw social links, no escaping here ***
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
-	// ... (existing social link building code remains the same) ...
 	if validationResult.WebsiteURL != "" {
-		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", notifications.EscapeMarkdownV2(validationResult.WebsiteURL)))
+		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", validationResult.WebsiteURL)) // Raw URL
 		hasSocials = true
 	}
 	if validationResult.TwitterURL != "" {
-		socialLinksBuilder.WriteString(fmt.Sprintf("🐦 Twitter: %s\n", notifications.EscapeMarkdownV2(validationResult.TwitterURL)))
+		socialLinksBuilder.WriteString(fmt.Sprintf("🐦 Twitter: %s\n", validationResult.TwitterURL)) // Raw URL
 		hasSocials = true
 	}
 	if validationResult.TelegramURL != "" {
-		socialLinksBuilder.WriteString(fmt.Sprintf("✈️ Telegram: %s\n", notifications.EscapeMarkdownV2(validationResult.TelegramURL)))
+		socialLinksBuilder.WriteString(fmt.Sprintf("✈️ Telegram: %s\n", validationResult.TelegramURL)) // Raw URL
 		hasSocials = true
 	}
 	for name, url := range validationResult.OtherSocials {
 		if url != "" {
-			emoji := "🔗" // Default emoji
+			emoji := "🔗"
 			lowerName := strings.ToLower(name)
 			if strings.Contains(lowerName, "discord") {
-				emoji = "<:discord:10014198 discord icon emoji ID>" // Replace with actual emoji or ID if needed
+				emoji = "<:discord:10014198 discord icon emoji ID>"
 			}
-			// Add more specific emojis if desired
 			if strings.Contains(lowerName, "medium") {
 				emoji = "📰"
 			}
-
-			socialLinksBuilder.WriteString(fmt.Sprintf("%s %s: %s\n", emoji, notifications.EscapeMarkdownV2(name), notifications.EscapeMarkdownV2(url)))
+			// Raw name, raw URL
+			socialLinksBuilder.WriteString(fmt.Sprintf("%s %s: %s\n", emoji, name, url))
 			hasSocials = true
 		}
 	}
 	socialsSection := ""
 	if hasSocials {
-		socialsSection = "\\-\\-\\- Socials \\-\\-\\-\n" + socialLinksBuilder.String()
+		// *** No manual escapes for separator ***
+		socialsSection = "--- Socials ---\n" + socialLinksBuilder.String()
 	}
 
-	// Check icon status
 	var iconStatus string
 	usePhoto := false
 	if validationResult.ImageURL != "" {
@@ -319,31 +314,31 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		} else {
 			appLogger.Warn("Invalid ImageURL format received from DexScreener", tokenField, zap.String("url", validationResult.ImageURL))
 			iconStatus = "⚠️ Icon URL Invalid"
-			usePhoto = false // Fallback to text if URL is bad
+			usePhoto = false
 		}
 	} else {
 		iconStatus = "❌ Icon Missing"
 		usePhoto = false
 	}
 
-	// Format main message caption
+	// *** Format raw caption, use intended markdown, no escaping ***
 	caption := fmt.Sprintf(
-		"*Token Graduated & Validated\\!* 🚀\n\n"+
-			"CA: `%s`\n"+
+		"*Token Graduated & Validated!* 🚀\n\n"+ // Keep intended markdown *!
+			"CA: `%s`\n"+ // Keep intended markdown `
 			"Icon: %s\n\n"+
-			"DexScreener: %s\n\n"+
-			"\\-\\-\\- Criteria Met \\-\\-\\-\n"+
-			"%s\n\n"+
-			"%s", // Socials section already includes newline if present
+			"DexScreener: %s\n\n"+ // Pass raw URL
+			"--- Criteria Met ---\n"+ // No manual escapes
+			"%s\n\n"+ // Pass raw criteria details
+			"%s", // Pass raw socials section
 		tokenAddress,
 		iconStatus,
-		dexscreenerURLEsc,
+		dexscreenerURL, // Use raw URL
 		criteriaDetails,
-		socialsSection, // Add the built socials string
+		socialsSection,
 	)
-	caption = strings.TrimRight(caption, "\n") // Clean up trailing newline
+	caption = strings.TrimRight(caption, "\n")
 
-	// Send notification to "bot calls" topic
+	// *** Send raw caption - notifications functions will handle escaping ***
 	if usePhoto {
 		notifications.SendBotCallPhotoMessage(validationResult.ImageURL, caption)
 		appLogger.Info("Telegram 'Bot Call' photo notification initiated", tokenField)
@@ -352,17 +347,14 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Info("Telegram 'Bot Call' text notification initiated", tokenField)
 	}
 
-	// Add to graduated cache (prevents immediate re-processing if webhook fires again)
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
 	appLogger.Info("Added token to graduatedTokenCache", tokenField)
 
-	// *** NEW: Add token to the progress tracking cache ***
 	if validationResult.MarketCap > 0 {
 		mcField := zap.Float64("baselineMC", validationResult.MarketCap)
 		trackedProgressCache.Lock()
-		// Only add if not already being tracked (safety check, though unlikely)
 		if _, exists := trackedProgressCache.Data[tokenAddress]; !exists {
 			trackedProgressCache.Data[tokenAddress] = TrackedTokenInfo{
 				BaselineMarketCap: validationResult.MarketCap,
@@ -375,15 +367,14 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 			appLogger.Info("Token already exists in progress tracking cache, skipping add.", tokenField, mcField)
 		}
 	} else {
-		// Don't add if market cap is zero, as it breaks multiplier calculation
 		appLogger.Info("Token not added to progress tracking (Market Cap is zero)", tokenField)
 	}
+	return nil // Success
 }
 
-// *** NEW: Function to periodically check token progress ***
 func CheckTokenProgress(appLogger *logger.Logger) {
-	checkInterval := 30 * time.Minute // Check every 30 minutes
-	targetMultiplier := 4.0           // Target multiplier (e.g., 4x)
+	checkInterval := 30 * time.Minute
+	targetMultiplier := 4.0
 
 	appLogger.Info("Token progress tracking routine started",
 		zap.Duration("interval", checkInterval),
@@ -425,7 +416,7 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 
 			appLogger.Debug("Checking progress for specific token", tokenField, mcBaselineField)
 
-			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger)
+			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger) // Assume exists
 
 			if err != nil {
 				appLogger.Warn("Error fetching current data during progress check", tokenField, zap.Error(err))
@@ -444,25 +435,23 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 
 					appLogger.Info("Token hit target market cap multiplier!", tokenField, mcBaselineField, mcCurrentField, zap.Float64("multiplier", multiplier), zap.Float64("roundedMultiplier", roundedMultiplier))
 
-					// *** CHANGE HERE: Generate raw link first ***
+					// *** Use raw dexscreener link ***
 					dexScreenerLinkRaw := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
-					// *** CHANGE HERE: Format the message WITHOUT internal escaping ***
-					// Use intended markdown like *, `, \! directly.
+					// *** Format raw message, use intended markdown, no escaping ***
 					progressMessage := fmt.Sprintf(
-						"🚀 Token `%s` did *%.0fx* from initial call\\!\n\n"+ // Keep manual escapes for !, *, `
-							"Initial MC: `$%.0f`\n"+ // Keep manual escapes for `
-							"Current MC: `$%.0f`\n\n"+ // Keep manual escapes for `
-							"DexScreener: %s", // Use the raw link string here
+						"🚀 Token `%s` did *%.0fx* from initial call!\n\n"+ // Keep intended markdown *!
+							"Initial MC: `$%.0f`\n"+ // Keep intended markdown `$`
+							"Current MC: `$%.0f`\n\n"+ // Keep intended markdown `$`
+							"DexScreener: %s", // Pass raw URL
 						tokenAddress,
 						roundedMultiplier,
 						baselineMarketCap,
 						currentMarketCap,
-						dexScreenerLinkRaw, // Pass the raw link
+						dexScreenerLinkRaw, // Use raw URL
 					)
 
-					// *** NO CHANGE HERE: Send the raw formatted message ***
-					// Escaping will happen inside SendTrackingUpdateMessage
+					// *** Send raw message - notifications will escape ***
 					notifications.SendTrackingUpdateMessage(progressMessage)
 					appLogger.Info("Sent tracking update notification", tokenField)
 
@@ -475,7 +464,7 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 				appLogger.Debug("Token progress check: Current market cap is zero or validation result missing.", tokenField, zap.Bool("hasResult", currentValidationResult != nil))
 			}
 
-			time.Sleep(150 * time.Millisecond) // Keep the small delay
+			time.Sleep(150 * time.Millisecond)
 		}
 
 		if len(tokensToRemove) > 0 {

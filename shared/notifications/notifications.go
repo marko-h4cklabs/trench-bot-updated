@@ -101,50 +101,46 @@ func GetBotInstance() *tgbotapi.BotAPI {
 	return bot
 }
 
+// Sends to default group, main thread - Escaping handled by core
 func SendTelegramMessage(message string) {
-	escaped := EscapeMarkdownV2(message)
-	coreSendMessageWithRetry(defaultGroupID, 0, escaped, false, "")
+	coreSendMessageWithRetry(defaultGroupID, 0, message, false, "")
 }
 
+// Sends to Bot Calls topic/thread - Escaping handled by core
 func SendBotCallMessage(message string) {
 	if env.BotCallsThreadID == 0 {
 		log.Println("WARN: Attempted to send to Bot Calls topic, but BOT_CALLS_THREAD_ID is not set.")
 		return
 	}
-	escapedMessage := EscapeMarkdownV2(message)
-	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedMessage, false, "")
+	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, message, false, "")
 }
 
+// Sends photo with caption to Bot Calls topic/thread - Escaping handled by core
 func SendBotCallPhotoMessage(photoURL string, caption string) {
 	if env.BotCallsThreadID == 0 {
 		log.Println("WARN: Attempted to send photo to Bot Calls topic, but BOT_CALLS_THREAD_ID is not set.")
 		return
 	}
 
-	escapedCaption := EscapeMarkdownV2(caption)
-
 	if _, err := url.ParseRequestURI(photoURL); err != nil {
 		log.Printf("ERROR: Invalid photo URL provided for Bot Call: %s - %v. Falling back to sending caption as text.", photoURL, err)
-		coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedCaption, false, "")
+		coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, caption, false, "") // Pass raw caption for fallback
 		return
 	}
-	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, escapedCaption, true, photoURL)
+	coreSendMessageWithRetry(defaultGroupID, env.BotCallsThreadID, caption, true, photoURL) // Pass raw caption
 }
 
+// Sends to Tracking topic/thread - Escaping handled by core
 func SendTrackingUpdateMessage(message string) {
 	if env.TrackingThreadID == 0 {
 		log.Println("WARN: Attempted to send to Tracking topic, but TRACKING_THREAD_ID is not set.")
 		return
 	}
-
-	// log.Printf("DEBUG [Tracking]: Original Message: [%s]", message) // Keep if needed
-	escapedMessage := EscapeMarkdownV2(message)
-	// log.Printf("DEBUG [Tracking]: Escaped Message: [%s]", escapedMessage) // Keep if needed
-
-	coreSendMessageWithRetry(defaultGroupID, env.TrackingThreadID, escapedMessage, false, "")
+	coreSendMessageWithRetry(defaultGroupID, env.TrackingThreadID, message, false, "") // Pass raw message
 }
 
-func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption string, isPhoto bool, photoURL string) {
+// Central function to handle sending, escaping, retries
+func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string) {
 	initMutex.Lock()
 	localIsInitialized := isInitialized
 	localBot := bot
@@ -168,6 +164,13 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 		}
 	}
 
+	// *** CENTRAL ESCAPING STEP ***
+	escapedTextOrCaption := EscapeMarkdownV2(rawTextOrCaption)
+	// *** Debug logs to verify escaping ***
+	// log.Printf("DEBUG CORE SEND: Raw: [%s]", rawTextOrCaption)
+	// log.Printf("DEBUG CORE SEND: Escaped: [%s]", escapedTextOrCaption)
+	// ***-----------------------------***
+
 	var lastErr error
 	logCtx := fmt.Sprintf("[ChatID: %d]", chatID)
 	if messageThreadID != 0 {
@@ -189,20 +192,18 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 		logCtx = fmt.Sprintf("[Photo]%s", logCtx)
 		apiMethod = "sendPhoto"
 		params["photo"] = photoURL
-		params["caption"] = textOrCaption
+		params["caption"] = escapedTextOrCaption // Use escaped text
 	} else {
 		logCtx = fmt.Sprintf("[Text]%s", logCtx)
 		apiMethod = "sendMessage"
-		params["text"] = textOrCaption
+		params["text"] = escapedTextOrCaption // Use escaped text
 	}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		_, err := localBot.MakeRequest(apiMethod, params)
-
 		if err == nil {
-			return
+			return // Success
 		}
-
 		lastErr = err
 
 		var tgErr *tgbotapi.Error
@@ -225,17 +226,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 				}
 				log.Printf("INFO: Telegram API rate limit hit (%d). Retrying after %d seconds... %s", tgErr.Code, specificRetryAfter, logCtx)
 			} else if tgErr.Code == 400 {
-				nonRetryable400s := []string{
-					"thread not found",
-					"can't parse entities",
-					"chat not found",
-					"wrong file identifier",
-					"Wrong remote file ID specified",
-					"can't download file",
-					"failed to get HTTP URL content",
-					"PHOTO_INVALID_DIMENSIONS",
-					"wrong type of chat",
-				}
+				nonRetryable400s := []string{"thread not found", "can't parse entities", "chat not found", "wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "wrong type of chat"}
 				isNonRetryable400 := false
 				for _, substring := range nonRetryable400s {
 					if strings.Contains(tgErr.Message, substring) {
@@ -243,17 +234,13 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 						break
 					}
 				}
-
 				if isNonRetryable400 {
 					shouldRetry = false
 					log.Printf("WARN: Non-retryable Telegram API error 400: %s. Aborting retries. %s", tgErr.Message, logCtx)
-
-					if isPhoto && (strings.Contains(tgErr.Message, "failed to get HTTP URL content") ||
-						strings.Contains(tgErr.Message, "wrong file identifier") ||
-						strings.Contains(tgErr.Message, "Wrong remote file ID specified") ||
-						strings.Contains(tgErr.Message, "can't download file")) {
+					if isPhoto && (strings.Contains(tgErr.Message, "failed to get HTTP URL content") || strings.Contains(tgErr.Message, "wrong file identifier") || strings.Contains(tgErr.Message, "Wrong remote file ID specified") || strings.Contains(tgErr.Message, "can't download file")) {
 						log.Printf("INFO: Falling back to sending caption as text message due to photo URL/fetch error. %s", logCtx)
-						coreSendMessageWithRetry(chatID, messageThreadID, textOrCaption, false, "")
+						// Retry as text, passing ORIGINAL raw caption
+						coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "")
 						return
 					}
 				} else {
@@ -264,10 +251,8 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 				shouldRetry = false
 				log.Printf("WARN: Non-retryable Telegram API error %d: %s. Aborting retries. %s", tgErr.Code, tgErr.Message, logCtx)
 			}
-
 		} else {
-			log.Printf("ERROR: Failed Telegram send (Attempt %d/%d): Network/Other error: %v %s",
-				attempt+1, maxRetries, err, logCtx)
+			log.Printf("ERROR: Failed Telegram send (Attempt %d/%d): Network/Other error: %v %s", attempt+1, maxRetries, err, logCtx)
 			shouldRetry = true
 		}
 
@@ -284,7 +269,6 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 		} else {
 			waitDuration = baseRetryWait * time.Duration(math.Pow(2, float64(attempt)))
 		}
-
 		log.Printf("INFO: Retrying failed Telegram send in %v... %s", waitDuration, logCtx)
 		time.Sleep(waitDuration)
 	}
@@ -294,18 +278,17 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, textOrCaption s
 		if isPhoto {
 			var lastTgErr *tgbotapi.Error
 			if errors.As(lastErr, &lastTgErr) {
-				if strings.Contains(lastTgErr.Message, "failed to get HTTP URL content") ||
-					strings.Contains(lastTgErr.Message, "wrong file identifier") ||
-					strings.Contains(lastTgErr.Message, "Wrong remote file ID specified") ||
-					strings.Contains(lastTgErr.Message, "can't download file") {
+				if strings.Contains(lastTgErr.Message, "failed to get HTTP URL content") || strings.Contains(lastTgErr.Message, "wrong file identifier") || strings.Contains(lastTgErr.Message, "Wrong remote file ID specified") || strings.Contains(lastTgErr.Message, "can't download file") {
 					log.Printf("INFO: Falling back to sending caption as text message after final photo send failure. %s", logCtx)
-					coreSendMessageWithRetry(chatID, messageThreadID, textOrCaption, false, "")
+					// Retry as text, passing ORIGINAL raw caption
+					coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "")
 				}
 			}
 		}
 	}
 }
 
+// EscapeMarkdownV2 remains the same
 func EscapeMarkdownV2(s string) string {
 	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	temp := s
