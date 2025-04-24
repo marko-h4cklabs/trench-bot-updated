@@ -1,91 +1,86 @@
+// In database/migrate.go
 package database
 
 import (
-	"ca-scraper/agent/internal/models"
-	"database/sql"
+	// Remove "ca-scraper/agent/internal/models" if not needed elsewhere in this file
+	"database/sql" // Need database/sql for migrate library source
+	"errors"
 	"log"
-	"os"
 
-	_ "github.com/lib/pq"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres" // Import postgres driver for migrate
+	_ "github.com/golang-migrate/migrate/v4/source/file"     // Import file source driver for migrate
+	_ "github.com/lib/pq"                                    // Import the PostgreSQL driver for database/sql
 )
 
-var DB *gorm.DB
+// Removed global var DB *gorm.DB
 
-// MigrateDatabase handles database migrations using GORM's AutoMigrate and raw SQL as a fallbac
+// MigrateDatabase runs SQL migrations from the specified directory.
 func MigrateDatabase(dsn string) {
-	// Determine environment
-	env := os.Getenv("APP_ENV")
-	log.Printf("Running migrations for environment: %s", env)
-
-	// Use GORM to connect to the database
-	var err error
-	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	log.Println("Connecting to database with database/sql for migrations...")
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		log.Fatalf("Failed to connect to the database with GORM: %v", err)
+		log.Fatalf("Failed to connect to database for migration: %v", err)
 	}
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			log.Printf("WARN: Error closing migration db connection: %v", cerr)
+		}
+	}()
 
-	// Run GORM migrations for the models
-	log.Println("Running GORM migrations...")
-	err = DB.AutoMigrate(&models.User{}, &models.BuyBotData{}, &models.Filter{})
+	// Ping DB to ensure connection is valid
+	if err = db.Ping(); err != nil {
+		log.Fatalf("Failed to ping database for migration: %v", err)
+	}
+	log.Println("Database connection established for migration.")
+
+	log.Println("Initializing migration driver...")
+	// Configure the migrate instance to use the PostgreSQL driver
+	driver, err := postgres.WithInstance(db, &postgres.Config{})
 	if err != nil {
-		log.Fatalf("Failed to perform GORM migrations: %v", err)
+		log.Fatalf("Failed to create postgres migration driver instance: %v", err)
 	}
-	log.Println("GORM migrations executed successfully.")
 
-	// Use raw SQL migrations as a safety fallback
-	dbSQL, err := sql.Open("postgres", dsn)
+	// Point migrate to the directory containing your SQL files
+	// Use "file://" prefix. Adjust the path relative to where your app runs.
+	// If running from project root, 'agent/database/migrations' should work.
+	migrationPath := "file://agent/database/migrations"
+	log.Printf("Looking for migrations in: %s", migrationPath)
+
+	m, err := migrate.NewWithDatabaseInstance(
+		migrationPath,
+		"postgres", // Specify the database type name used by the driver
+		driver,
+	)
 	if err != nil {
-		log.Fatalf("Failed to connect to the database with SQL: %v", err)
-	}
-	defer dbSQL.Close()
-
-	executeSQLMigrations(dbSQL, env)
-}
-
-// executeSQLMigrations performs raw SQL migrations as a fallback
-func executeSQLMigrations(db *sql.DB, env string) {
-	queries := []string{
-		`CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            wallet_id TEXT UNIQUE NOT NULL,
-            nft_status BOOLEAN NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );`,
-		`CREATE TABLE IF NOT EXISTS buy_bot_data (
-            id SERIAL PRIMARY KEY,
-            contract TEXT NOT NULL,
-            volume FLOAT NOT NULL,
-            buys INT NOT NULL,
-            sells INT NOT NULL,
-            collected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            verified BOOLEAN DEFAULT FALSE
-        );`,
-		`CREATE TABLE IF NOT EXISTS filters (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT NOT NULL,
-            criteria JSONB NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );`,
+		log.Fatalf("Failed to initialize migrate instance: %v", err)
 	}
 
-	// Apply environment-specific constraints
-	if env == "production" || env == "staging" {
-		queries = append(queries,
-			`ALTER TABLE buy_bot_data ADD CONSTRAINT verified_default CHECK (verified IN (true, false));`,
-		)
+	log.Println("Running database migrations up...")
+	// Apply all pending "up" migrations
+	err = m.Up()
+
+	// Check the result
+	if err != nil {
+		// migrate.ErrNoChange means migrations were already up-to-date
+		if errors.Is(err, migrate.ErrNoChange) {
+			log.Println("Database schema is already up to date. No changes applied.")
+		} else {
+			// Report any other migration error
+			log.Fatalf("Failed to apply database migrations: %v", err)
+		}
+	} else {
+		log.Println("Database migrations applied successfully.")
 	}
 
-	// Execute each query
-	for _, query := range queries {
-		_, err := db.Exec(query)
-		if err != nil {
-			log.Fatalf("Failed to execute query: %s, error: %v", query, err)
+	// Log the current migration version (optional)
+	version, dirty, vErr := m.Version()
+	if vErr != nil {
+		log.Printf("WARN: Could not get migration version after applying: %v", vErr)
+	} else {
+		log.Printf("Current migration version: %d, Dirty: %t", version, dirty)
+		if dirty {
+			log.Println("WARN: Migration state is dirty. This might indicate a previously failed migration.")
 		}
 	}
-	log.Println("Raw SQL migrations executed successfully.")
 }

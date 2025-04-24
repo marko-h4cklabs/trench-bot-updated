@@ -1,94 +1,95 @@
 package bot
 
 import (
-	"ca-scraper/shared/notifications" // Ensure correct import path
-	"encoding/json"
+	"ca-scraper/shared/env"           // Import env for NFTMinimumHolding
+	"ca-scraper/shared/notifications" // Use your actual path for notifications (needs refactoring for telego)
+
+	// "ca-scraper/agent/database"       // *** Your REAL database package import goes here ***
+	"context" // Needed for Telego SendMessage
 	"errors"
 	"fmt"
-	"log" // Keep standard log for errors if appLogger isn't guaranteed
+	"log"
 	"strings"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	// Add logger import if appLogger is used here, e.g.:
-	// "ca-scraper/shared/logger"
+	//"strconv" // Not needed here anymore
+
+	"github.com/mymmrac/telego" // <--- USE TELEGO
+	// Remove tgbotapi import
+	"go.uber.org/zap"
+	// Import your logger if needed
 )
 
-// Keep appLogger variable if it's initialized and passed correctly from bot.go
-// var appLogger *logger.Logger
+// Assume appLogger and dbInstance are accessible package-level variables
 
-// --- getThreadIDFromUpdate (Keep Existing Logic) ---
-func getThreadIDFromUpdate(update tgbotapi.Update) int {
-	message := update.Message
-	if message == nil {
-		return 0
-	}
+// --- getThreadIDFromUpdate using Telego Update ---
+// Corrected based on telego.Message struct
+func getThreadIDFromUpdate(update telego.Update) int {
+	var threadID int // Default to 0
 
-	threadID := 0
-
-	// Check ReplyToMessage first (keep JSON parsing logic as provided)
-	if message.ReplyToMessage != nil {
-		replyJSON, err := json.Marshal(message.ReplyToMessage)
-		if errMarshalReply := err; errMarshalReply == nil {
-			var replyMap map[string]interface{}
-			if errUnmarshalReply := json.Unmarshal(replyJSON, &replyMap); errUnmarshalReply == nil {
-				if threadIDVal, ok := replyMap["message_thread_id"]; ok {
-					if tidFloat, ok := threadIDVal.(float64); ok {
-						threadID = int(tidFloat)
-						if threadID != 0 {
-							return threadID
-						}
-					}
-				}
-			}
+	if update.Message != nil {
+		// Check the message itself first
+		if update.Message.MessageThreadID != 0 {
+			return update.Message.MessageThreadID
+		}
+		// Then check the message it might be replying to
+		if update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.MessageThreadID != 0 {
+			return update.Message.ReplyToMessage.MessageThreadID
 		}
 	}
-
-	// Check main Message if not found in reply (keep JSON parsing logic as provided)
-	if threadID == 0 {
-		messageJSON, err := json.Marshal(message)
-		if errMarshalMsg := err; errMarshalMsg == nil {
-			var messageMap map[string]interface{}
-			if errUnmarshalMsg := json.Unmarshal(messageJSON, &messageMap); errUnmarshalMsg == nil {
-				if threadIDVal, ok := messageMap["message_thread_id"]; ok {
-					if tidFloat, ok := threadIDVal.(float64); ok {
-						threadID = int(tidFloat)
-					}
-				}
-			}
-		}
-	}
-
-	return threadID
+	return threadID // Return 0 if not found
 }
 
-// --- HandleCommand (Keep Existing Logic, Ensure appLogger is valid) ---
-func HandleCommand(update tgbotapi.Update, command, args string) {
+// --- Modified HandleCommand with NFT Verification Check using Telego ---
+func HandleCommand(update telego.Update, command, args string) { // Update parameter type
 	if update.Message == nil {
-		return // Ignore updates without messages
-	}
-	chatID := update.Message.Chat.ID
-	threadID := getThreadIDFromUpdate(update)
-
-	// Make sure appLogger is available here (likely set in bot.go's InitializeBot)
-	if appLogger == nil {
-		log.Println("ERROR: appLogger is nil in HandleCommand")
-		// Optionally send a basic reply indicating an internal error
-		// SendReply(chatID, threadID, "Internal error processing command.")
 		return
 	}
+	chatID := telego.ChatID{ID: update.Message.Chat.ID}
+	userID := update.Message.From.ID
+	threadID := getThreadIDFromUpdate(update)
 
-	// Keep detailed logging
-	appLogger.Zap().Infow("Processing command",
-		"command", command,
-		"args", args,
-		"chatID", chatID,
-		"determinedThreadID", threadID,
-		"user", update.Message.From.UserName,
-		"userID", update.Message.From.ID,
-	)
+	if appLogger == nil {
+		log.Println("ERROR: appLogger is nil in HandleCommand")
+		_ = SendReply(chatID, threadID, "An internal error occurred. Please notify an administrator.")
+		return
+	}
+	logFields := []interface{}{
+		"command", command, "args", args, "chatID", chatID.ID, "threadID", threadID,
+		"user", update.Message.From.Username, "userID", userID,
+	}
+	appLogger.Zap().Infow("Processing command", logFields...)
 
-	// Route command, passing raw text to handlers/SendReply
+	restrictedCommands := map[string]bool{
+		"whitelist":    true,
+		"walletupdate": true,
+		"walletdelete": true,
+	}
+
+	if restrictedCommands[command] {
+		appLogger.Debug("Checking user verification status", zap.Int64("userID", userID))
+		// *** STEP 1: Replace with your actual database call to check status ***
+		// Example: isVerified, err := database.IsUserVerified(dbInstance, userID)
+		isVerified := false
+		var err error = nil
+
+		if err != nil {
+			appLogger.Error("Database error checking user verification status", zap.Error(err), zap.Int64("userID", userID))
+			_ = SendReply(chatID, threadID, "An error occurred while checking your access status. Please try again later.")
+			return
+		}
+
+		if !isVerified {
+			appLogger.Info("Access denied: User not verified", zap.Int64("userID", userID), zap.String("command", command))
+			replyMsg := fmt.Sprintf("Access Denied. Please use the `/verify` command to connect your wallet and verify you hold at least %d Trench Demon NFTs.", env.NFTMinimumHolding)
+			_ = SendReply(chatID, threadID, replyMsg)
+			return
+		}
+		appLogger.Info("Access granted (verified user)", zap.Int64("userID", userID), zap.String("command", command))
+	}
+
 	switch command {
+	case "verify":
+		handleVerifyCommand(chatID, threadID)
 	case "whitelist":
 		handleWhitelistCommand(chatID, threadID, args)
 	case "walletupdate":
@@ -98,114 +99,139 @@ func HandleCommand(update tgbotapi.Update, command, args string) {
 	case "start", "help":
 		handleHelpCommand(chatID, threadID)
 	default:
-		appLogger.Zap().Warnw("Unknown command received", "command", command, "chatID", chatID, "threadID", threadID)
-		// Prepare raw message
+		appLogger.Zap().Warnw("Unknown command received", logFields...)
 		rawMessage := fmt.Sprintf("Unknown command: /%s", command)
-		// Send raw message
-		SendReply(chatID, threadID, rawMessage)
+		_ = SendReply(chatID, threadID, rawMessage)
 	}
 }
 
-// --- Command Handlers (Pass RAW text to SendReply) ---
+func handleVerifyCommand(chatID telego.ChatID, threadID int) {
+	miniAppURL := "https://YOUR_MINI_APP_HOSTING_URL/" // Example placeholder
 
-func handleWhitelistCommand(chatID int64, threadID int, args string) {
-	wallet := strings.TrimSpace(args)
-	if wallet == "" {
-		// Send raw usage message
-		SendReply(chatID, threadID, "Usage: /whitelist {wallet-address}")
+	if miniAppURL == "https://YOUR_MINI_APP_HOSTING_URL/" || miniAppURL == "" {
+		log.Println("ERROR: Mini App URL is not configured in handleVerifyCommand!")
+		if appLogger != nil {
+			appLogger.Error("Mini App URL is not configured")
+		}
+		_ = SendReply(chatID, threadID, "Verification service is currently unavailable (configuration error). Please contact an admin.")
 		return
 	}
 
-	// Keep logging as needed
-	appLogger.Zap().Infow("Whitelist command received (DB disabled)", "wallet", wallet, "chatID", chatID, "threadID", threadID)
-	// Prepare raw reply message with Markdown
-	rawMessage := fmt.Sprintf("Received whitelist command for: `%s`", wallet)
-	// Send raw message
-	SendReply(chatID, threadID, rawMessage)
-}
-
-func handleWalletUpdateCommand(chatID int64, threadID int, args string) {
-	parts := strings.Fields(args)
-	if len(parts) != 2 {
-		// Send raw usage message
-		SendReply(chatID, threadID, "Usage: /walletupdate {current-wallet} {new-wallet}")
-		return
+	webApp := &telego.WebAppInfo{URL: miniAppURL}
+	button := telego.InlineKeyboardButton{
+		Text:   "🔒 Connect Wallet & Verify NFTs",
+		WebApp: webApp,
 	}
-	currWallet := parts[0]
-	newWallet := parts[1]
-
-	// Keep logging as needed
-	appLogger.Zap().Infow("Wallet update command received (DB disabled)", "oldWallet", currWallet, "newWallet", newWallet, "chatID", chatID, "threadID", threadID)
-	// Prepare raw reply message with Markdown
-	rawMessage := fmt.Sprintf("Received wallet update command: `%s` -> `%s`", currWallet, newWallet)
-	// Send raw message
-	SendReply(chatID, threadID, rawMessage)
-}
-
-func handleWalletDeleteCommand(chatID int64, threadID int, args string) {
-	wallet := strings.TrimSpace(args)
-	if wallet == "" {
-		// Send raw usage message
-		SendReply(chatID, threadID, "Usage: /walletdelete {wallet-address}")
-		return
+	keyboard := &telego.InlineKeyboardMarkup{
+		InlineKeyboard: [][]telego.InlineKeyboardButton{{button}},
 	}
 
-	// Keep logging as needed
-	appLogger.Zap().Infow("Wallet delete command received (DB disabled)", "wallet", wallet, "chatID", chatID, "threadID", threadID)
-	// Prepare raw reply message with Markdown
-	rawMessage := fmt.Sprintf("Received wallet delete command for: `%s`", wallet)
-	// Send raw message
-	SendReply(chatID, threadID, rawMessage)
-}
+	text := "Click the button below to connect your Solana wallet and verify your Trench Demon NFT holdings:"
 
-func handleHelpCommand(chatID int64, threadID int) {
-	// Prepare raw help text with intended Markdown
-	helpText := `*Available commands:*
-*/whitelist {wallet}* - _(DB Disabled)_
-*/walletupdate {current} {new}* - _(DB Disabled)_
-*/walletdelete {wallet}* - _(DB Disabled)_
-*/help* - Show this help`
-	// Send raw message
-	SendReply(chatID, threadID, helpText)
-}
+	msgParams := &telego.SendMessageParams{
+		ChatID:      chatID,
+		Text:        text,
+		ReplyMarkup: keyboard,
+	}
 
-// --- SendReply function (Accepts RAW text, Escapes ONCE before sending) ---
-func SendReply(chatID int64, threadID int, rawText string) {
+	if threadID != 0 {
+		msgParams.MessageThreadID = threadID // Correct field for Telego
+	}
+
 	theBot := notifications.GetBotInstance()
 	if theBot == nil {
-		log.Println("ERROR: Cannot send reply, bot instance (tgbotapi) is nil.")
+		log.Println("ERROR: Bot instance nil in handleVerifyCommand")
+		_ = SendReply(chatID, threadID, "Error: Could not initialize verification process. Please contact an admin.")
 		return
 	}
 
-	// --- Escape the raw text ONCE here ---
-	escapedText := notifications.EscapeMarkdownV2(rawText)
-	// ------------------------------------
-
-	params := make(map[string]string)
-	params["chat_id"] = fmt.Sprintf("%d", chatID)
-	params["text"] = escapedText                   // Use the escaped text
-	params["parse_mode"] = tgbotapi.ModeMarkdownV2 // Mode is essential
-	if threadID != 0 {
-		params["message_thread_id"] = fmt.Sprintf("%d", threadID)
-	}
-
-	_, err := theBot.MakeRequest("sendMessage", params)
+	_, err := theBot.SendMessage(context.Background(), msgParams)
 	if err != nil {
-		// Keep detailed error logging, logging the ORIGINAL raw text is helpful
+		log.Printf("ERROR sending verify command reply: %v", err)
 		if appLogger != nil {
-			// Pass rawText to log context for easier debugging
-			logArgs := []interface{}{"chatID", chatID, "threadID", threadID, "error", err, "originalText", rawText}
-			var tgErr *tgbotapi.Error
-			if errors.As(err, &tgErr) {
-				logArgs = append(logArgs, "apiErrorCode", tgErr.Code, "apiErrorDesc", tgErr.Message)
-			}
-			appLogger.Zap().Errorw("Failed to send reply via MakeRequest", logArgs...)
-		} else {
-			// Fallback to standard logger if appLogger isn't available
-			log.Printf("ERROR: Failed to send tgbotapi reply via MakeRequest to chat %d (thread %d): %v. Original Text: %s", chatID, threadID, err, rawText)
+			appLogger.Error("Failed to send verify command reply", zap.Error(err), zap.Int64("chatID", chatID.ID))
+		}
+		_ = SendReply(chatID, threadID, "Could not display the verification button. Please try using the `/verify` command again later.")
+	} else {
+		if appLogger != nil {
+			appLogger.Info("Verify prompt sent successfully", zap.Int64("chatID", chatID.ID))
 		}
 	}
 }
 
-// Assume appLogger is initialized and accessible in this package, typically via bot.go
-// var appLogger *logger.Logger // Declaration if needed, initialization happens elsewhere
+func handleWhitelistCommand(chatID telego.ChatID, threadID int, args string) {
+	wallet := strings.TrimSpace(args)
+	if wallet == "" {
+		_ = SendReply(chatID, threadID, "Usage: /whitelist {wallet-address}")
+		return
+	}
+	appLogger.Zap().Infow("Whitelist command execution", "wallet", wallet, "chatID", chatID.ID, "threadID", threadID)
+	rawMessage := fmt.Sprintf("Received whitelist command for: `%s` (DB Action Placeholder)", wallet)
+	_ = SendReply(chatID, threadID, rawMessage)
+}
+
+func handleWalletUpdateCommand(chatID telego.ChatID, threadID int, args string) {
+	parts := strings.Fields(args)
+	if len(parts) != 2 {
+		_ = SendReply(chatID, threadID, "Usage: /walletupdate {current-wallet} {new-wallet}")
+		return
+	}
+	currWallet := parts[0]
+	newWallet := parts[1]
+	appLogger.Zap().Infow("Wallet update command execution", "oldWallet", currWallet, "newWallet", newWallet, "chatID", chatID.ID, "threadID", threadID)
+	rawMessage := fmt.Sprintf("Received wallet update command: `%s` -> `%s` (DB Action Placeholder)", currWallet, newWallet)
+	_ = SendReply(chatID, threadID, rawMessage)
+}
+
+func handleWalletDeleteCommand(chatID telego.ChatID, threadID int, args string) {
+	wallet := strings.TrimSpace(args)
+	if wallet == "" {
+		_ = SendReply(chatID, threadID, "Usage: /walletdelete {wallet-address}")
+		return
+	}
+	appLogger.Zap().Infow("Wallet delete command execution", "wallet", wallet, "chatID", chatID.ID, "threadID", threadID)
+	rawMessage := fmt.Sprintf("Received wallet delete command for: `%s` (DB Action Placeholder)", wallet)
+	_ = SendReply(chatID, threadID, rawMessage)
+}
+
+func handleHelpCommand(chatID telego.ChatID, threadID int) {
+	helpText := `*Available commands:*
+*/verify* - Connect wallet & verify NFT holdings for access
+*/whitelist {wallet}* - _(Requires Verification)_
+*/walletupdate {current} {new}* - _(Requires Verification)_
+*/walletdelete {wallet}* - _(Requires Verification)_
+*/help* - Show this help`
+	_ = SendReply(chatID, threadID, helpText)
+}
+
+// --- Refactored SendReply function for Telego ---
+func SendReply(chatID telego.ChatID, threadID int, rawText string) error {
+	theBot := notifications.GetBotInstance() // Must return *telego.Bot
+	if theBot == nil {
+		log.Println("ERROR: Cannot send reply, bot instance (telego) is nil.")
+		return errors.New("bot instance is nil")
+	}
+
+	escapedText := notifications.EscapeMarkdownV2(rawText)
+
+	params := &telego.SendMessageParams{
+		ChatID:    chatID,
+		Text:      escapedText,
+		ParseMode: telego.ModeMarkdownV2,
+	}
+	if threadID != 0 {
+		params.MessageThreadID = threadID
+	}
+
+	_, err := theBot.SendMessage(context.Background(), params)
+
+	if err != nil {
+		log.Printf("ERROR: Failed to send Telego reply to chat %d (thread %d): %v. Original Text: %s", chatID.ID, threadID, err, rawText)
+		if appLogger != nil {
+			logArgs := []interface{}{"chatID", chatID.ID, "threadID", threadID, "error", err, "originalText", rawText}
+			// Add specific Telego error checking here if needed
+			appLogger.Zap().Errorw("Failed to send reply via Telego SendMessage", logArgs...)
+		}
+	}
+	return err
+}

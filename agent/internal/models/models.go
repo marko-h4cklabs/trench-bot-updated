@@ -1,33 +1,46 @@
+// In internal/models/models.go
 package models
 
-import "time"
+import (
+	"time"
 
-// User represents an authenticated user
+	"gorm.io/gorm"
+)
+
+// User represents a Telegram user interacting with the bot
 type User struct {
-	ID        uint      `gorm:"primaryKey"`      // Auto-increment primary key
-	WalletID  string    `gorm:"unique;not null"` // Wallet ID for authentication
-	NFTStatus bool      `gorm:"not null"`        // Indicates if the user holds the required NFT
-	CreatedAt time.Time `gorm:"autoCreateTime"`  // Creation timestamp
-	UpdatedAt time.Time `gorm:"autoUpdateTime"`  // Update timestamp
+	// Use Telegram User ID as the primary key
+	TelegramUserID int64 `gorm:"primaryKey"`
+
+	// Verification status flag
+	IsNftVerified bool `gorm:"not null;default:false;column:is_nft_verified"` // Explicit column name
+
+	// GORM standard fields (optional but good practice)
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	DeletedAt gorm.DeletedAt `gorm:"index"`
+
+	// Optional: Store the last verified wallet if needed for other features
+	// LastVerifiedWallet string `gorm:"size:44"` // Example: Solana addresses are typically 32-44 chars
 }
 
-// BuyBotData represents the data collected from buy bots
+// BuyBotData struct remains the same
 type BuyBotData struct {
-	ID          uint      `gorm:"primaryKey"`     // Auto-increment primary key
-	Contract    string    `gorm:"not null"`       // Contract address
-	Volume      float64   `gorm:"not null"`       // Transaction volume
-	Buys        int       `gorm:"not null"`       // Number of buy transactions
-	Sells       int       `gorm:"not null"`       // Number of sell transactions
-	CollectedAt time.Time `gorm:"autoCreateTime"` // Timestamp of data collection
-	Verified    bool      `gorm:"default:false"`  // Indicates if the contract is verified
+	ID          uint      `gorm:"primaryKey"`
+	Contract    string    `gorm:"not null"`
+	Volume      float64   `gorm:"not null"`
+	Buys        int       `gorm:"not null"`
+	Sells       int       `gorm:"not null"`
+	CollectedAt time.Time `gorm:"autoCreateTime"`
+	Verified    bool      `gorm:"default:false"`
 }
 
-// Filter represents the filters for data processing
+// Filter struct remains the same
 type Filter struct {
-	ID          uint      `gorm:"primaryKey"`     // Auto-increment primary key
-	Name        string    `gorm:"not null"`       // Filter name
-	Description string    `gorm:"not null"`       // Filter description
-	Criteria    string    `gorm:"type:jsonb"`     // JSON representation of filter criteria
-	CreatedAt   time.Time `gorm:"autoCreateTime"` // Creation timestamp
-	UpdatedAt   time.Time `gorm:"autoUpdateTime"` // Update timestamp
+	ID          uint      `gorm:"primaryKey"`
+	Name        string    `gorm:"not null"`
+	Description string    `gorm:"not null"`
+	Criteria    string    `gorm:"type:jsonb"` // Assuming criteria is stored as JSON string
+	CreatedAt   time.Time `gorm:"autoCreateTime"`
+	UpdatedAt   time.Time `gorm:"autoUpdateTime"`
 }
