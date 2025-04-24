@@ -10,7 +10,7 @@ import (
 
 var (
 	TelegramBotToken string
-	TelegramGroupID  int64
+	TelegramGroupID  int64 // Stays int64
 	BotCallsThreadID int
 	TrackingThreadID int
 
@@ -42,6 +42,7 @@ var (
 	LOCAL_DATABASE_NAME     string
 )
 
+// loadEnvVariable remains the same
 func loadEnvVariable(key string, isRequired bool) string {
 	value := os.Getenv(key)
 	if isRequired && value == "" {
@@ -60,7 +61,8 @@ func loadEnvVariable(key string, isRequired bool) string {
 	return value
 }
 
-func loadIntEnv(key string, required bool, isGroupID bool) int {
+// loadIntEnv for standard integers
+func loadIntEnv(key string, required bool) int { // Removed isGroupID parameter
 	strValue := loadEnvVariable(key, required)
 	if strValue == "" {
 		if !required {
@@ -68,24 +70,36 @@ func loadIntEnv(key string, required bool, isGroupID bool) int {
 			return 0
 		}
 		log.Fatalf("FATAL: Required integer environment variable %s is missing after load.", key)
-		return 0
+		return 0 // Should not be reached
 	}
-	if isGroupID {
-		id, err := strconv.ParseInt(strValue, 10, 64)
-		if err != nil {
-			log.Fatalf("FATAL: Failed to parse int64 environment variable %s='%s': %v", key, strValue, err)
-		}
-		if id > 2147483647 || id < -2147483648 {
-			log.Fatalf("FATAL: Group ID %s='%d' is out of standard int range.", key, id)
-		}
-		return int(id)
-	}
+
 	id, err := strconv.Atoi(strValue)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to parse integer environment variable %s='%s': %v", key, strValue, err)
 	}
 	return id
 }
+
+// --- NEW: Specific function to load int64 ---
+func loadInt64Env(key string, required bool) int64 {
+	strValue := loadEnvVariable(key, required)
+	if strValue == "" {
+		if !required {
+			log.Printf("INFO: Optional int64 environment variable %s is missing, defaulting to 0.", key)
+			return 0
+		}
+		log.Fatalf("FATAL: Required int64 environment variable %s is missing after load.", key)
+		return 0 // Should not be reached
+	}
+
+	id, err := strconv.ParseInt(strValue, 10, 64) // Parse directly as int64
+	if err != nil {
+		log.Fatalf("FATAL: Failed to parse int64 environment variable %s='%s': %v", key, strValue, err)
+	}
+	return id // Return the parsed int64
+}
+
+// --- End new function ---
 
 func LoadEnv() error {
 	err := godotenv.Load()
@@ -113,9 +127,13 @@ func LoadEnv() error {
 		Port = "8080"
 		log.Printf("INFO: PORT not set, defaulting to %s", Port)
 	}
-	TelegramGroupID = int64(loadIntEnv("TELEGRAM_GROUP_ID", true, true))
-	BotCallsThreadID = loadIntEnv("BOT_CALLS_THREAD_ID", false, false)
-	TrackingThreadID = loadIntEnv("TRACKING_THREAD_ID", false, false)
+
+	// --- CORRECTED: Use loadInt64Env for TelegramGroupID ---
+	TelegramGroupID = loadInt64Env("TELEGRAM_GROUP_ID", true)
+	// --- Use standard loadIntEnv for thread IDs (assuming they fit in int) ---
+	BotCallsThreadID = loadIntEnv("BOT_CALLS_THREAD_ID", false)
+	TrackingThreadID = loadIntEnv("TRACKING_THREAD_ID", false)
+
 	NFTCollectionAddress = loadEnvVariable("NFT_COLLECTION_ADDRESS", true)
 	nftMinHoldingStr := loadEnvVariable("NFT_MINIMUM_HOLDING", false)
 	if nftMinHoldingStr == "" {
@@ -137,7 +155,6 @@ func LoadEnv() error {
 	PGPASSWORD = loadEnvVariable("PGPASSWORD", false)
 	PGDATABASE = loadEnvVariable("PGDATABASE", false)
 	DATABASE_URL = loadEnvVariable("DATABASE_URL", false)
-
 	LOCAL_DATABASE_HOST = loadEnvVariable("LOCAL_DATABASE_HOST", true)
 	LOCAL_DATABASE_PORT = loadEnvVariable("LOCAL_DATABASE_PORT", true)
 	LOCAL_DATABASE_USER = loadEnvVariable("LOCAL_DATABASE_USER", true)
