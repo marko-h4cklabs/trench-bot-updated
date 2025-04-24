@@ -28,6 +28,8 @@ var (
 	NFTCollectionAddress string
 	NFTMinimumHolding    int
 
+	MiniAppURL string // Added for frontend URL
+
 	PGHOST     string
 	PGPORT     string
 	PGUSER     string
@@ -48,7 +50,7 @@ func loadEnvVariable(key string, isRequired bool) string {
 	if isRequired && value == "" {
 		log.Fatalf("FATAL: Environment variable %s is required but not set.", key)
 	}
-	isHidden := key == "TELEGRAM_BOT_TOKEN" || key == "HELIUS_API_KEY" || key == "WEBHOOK_SECRET" || key == "LOCAL_DATABASE_PASSWORD" || key == "PGPASSWORD" || key == "DATABASE_URL"
+	isHidden := key == "TELEGRAM_BOT_TOKEN" || key == "HELIUS_API_KEY" || key == "WEBHOOK_SECRET" || key == "LOCAL_DATABASE_PASSWORD" || key == "PGPASSWORD" || key == "DATABASE_URL" || key == "MINI_APP_URL"
 	if value == "" {
 		if !isRequired {
 			log.Printf("INFO: Environment variable %s is not set.", key)
@@ -143,6 +145,8 @@ func LoadEnv() error {
 		log.Printf("INFO: NFT Minimum Holding required for verification: %d", NFTMinimumHolding)
 	}
 
+	MiniAppURL = loadEnvVariable("MINI_APP_URL", true)
+
 	DATABASE_URL = loadEnvVariable("DATABASE_URL", true)
 
 	PGHOST = loadEnvVariable("PGHOST", false)
@@ -159,6 +163,10 @@ func LoadEnv() error {
 
 	if DATABASE_URL == "" {
 		log.Println("WARN: DATABASE_URL is not set. Connection logic might rely on PG* or LOCAL_* variables.")
+	}
+
+	if MiniAppURL == "" {
+		log.Println("WARN: MINI_APP_URL is required but was not loaded correctly.")
 	}
 
 	if TelegramBotToken != "" && TelegramGroupID == 0 {

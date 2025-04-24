@@ -1,46 +1,36 @@
 package bot
 
 import (
-	"ca-scraper/shared/env"           // Import env for NFTMinimumHolding
-	"ca-scraper/shared/notifications" // Use your actual path for notifications (needs refactoring for telego)
-
-	// "ca-scraper/agent/database"       // *** Your REAL database package import goes here ***
-	"context" // Needed for Telego SendMessage
+	"ca-scraper/shared/env" // Ensure env package is imported
+	"ca-scraper/shared/notifications"
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
 
-	//"strconv" // Not needed here anymore
-
-	"github.com/mymmrac/telego" // <--- USE TELEGO
-	// Remove tgbotapi import
+	"github.com/mymmrac/telego"
 	"go.uber.org/zap"
-	// Import your logger if needed
+	// Your other necessary imports...
+	// "ca-scraper/agent/database" // If needed for verification checks
 )
 
 // Assume appLogger and dbInstance are accessible package-level variables
 
-// --- getThreadIDFromUpdate using Telego Update ---
-// Corrected based on telego.Message struct
 func getThreadIDFromUpdate(update telego.Update) int {
 	var threadID int // Default to 0
-
 	if update.Message != nil {
-		// Check the message itself first
 		if update.Message.MessageThreadID != 0 {
 			return update.Message.MessageThreadID
 		}
-		// Then check the message it might be replying to
 		if update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.MessageThreadID != 0 {
 			return update.Message.ReplyToMessage.MessageThreadID
 		}
 	}
-	return threadID // Return 0 if not found
+	return threadID
 }
 
-// --- Modified HandleCommand with NFT Verification Check using Telego ---
-func HandleCommand(update telego.Update, command, args string) { // Update parameter type
+func HandleCommand(update telego.Update, command, args string) {
 	if update.Message == nil {
 		return
 	}
@@ -67,10 +57,10 @@ func HandleCommand(update telego.Update, command, args string) { // Update param
 
 	if restrictedCommands[command] {
 		appLogger.Debug("Checking user verification status", zap.Int64("userID", userID))
-		// *** STEP 1: Replace with your actual database call to check status ***
+		// *** Replace with your actual database call using dbInstance ***
 		// Example: isVerified, err := database.IsUserVerified(dbInstance, userID)
-		isVerified := false
-		var err error = nil
+		isVerified := false // Placeholder
+		var err error = nil // Placeholder
 
 		if err != nil {
 			appLogger.Error("Database error checking user verification status", zap.Error(err), zap.Int64("userID", userID))
@@ -89,7 +79,7 @@ func HandleCommand(update telego.Update, command, args string) { // Update param
 
 	switch command {
 	case "verify":
-		handleVerifyCommand(chatID, threadID)
+		handleVerifyCommand(chatID, threadID) // Uses the updated function below
 	case "whitelist":
 		handleWhitelistCommand(chatID, threadID, args)
 	case "walletupdate":
@@ -105,19 +95,20 @@ func HandleCommand(update telego.Update, command, args string) { // Update param
 	}
 }
 
+// --- UPDATED handleVerifyCommand ---
 func handleVerifyCommand(chatID telego.ChatID, threadID int) {
-	miniAppURL := "trench-bot-frontend-app-production.up.railway.app/" // Example placeholder
-
-	if miniAppURL == "trench-bot-frontend-app-production.up.railway.app/" || miniAppURL == "" {
-		log.Println("ERROR: Mini App URL is not configured in handleVerifyCommand!")
+	// Use the Mini App URL loaded from the environment
+	if env.MiniAppURL == "" {
+		// This check is a safeguard; LoadEnv should have caught this if required=true
+		log.Println("ERROR: MINI_APP_URL environment variable is not set or empty in handleVerifyCommand!")
 		if appLogger != nil {
-			appLogger.Error("Mini App URL is not configured")
+			appLogger.Error("MINI_APP_URL environment variable is missing or empty")
 		}
 		_ = SendReply(chatID, threadID, "Verification service is currently unavailable (configuration error). Please contact an admin.")
 		return
 	}
 
-	webApp := &telego.WebAppInfo{URL: miniAppURL}
+	webApp := &telego.WebAppInfo{URL: env.MiniAppURL} // Use the loaded env var
 	button := telego.InlineKeyboardButton{
 		Text:   "🔒 Connect Wallet & Verify NFTs",
 		WebApp: webApp,
@@ -135,7 +126,7 @@ func handleVerifyCommand(chatID telego.ChatID, threadID int) {
 	}
 
 	if threadID != 0 {
-		msgParams.MessageThreadID = threadID // Correct field for Telego
+		msgParams.MessageThreadID = threadID
 	}
 
 	theBot := notifications.GetBotInstance()
@@ -147,14 +138,14 @@ func handleVerifyCommand(chatID telego.ChatID, threadID int) {
 
 	_, err := theBot.SendMessage(context.Background(), msgParams)
 	if err != nil {
-		log.Printf("ERROR sending verify command reply: %v", err)
+		log.Printf("ERROR sending verify command reply with button: %v", err)
 		if appLogger != nil {
 			appLogger.Error("Failed to send verify command reply", zap.Error(err), zap.Int64("chatID", chatID.ID))
 		}
 		_ = SendReply(chatID, threadID, "Could not display the verification button. Please try using the `/verify` command again later.")
 	} else {
 		if appLogger != nil {
-			appLogger.Info("Verify prompt sent successfully", zap.Int64("chatID", chatID.ID))
+			appLogger.Info("Verify prompt with button sent successfully", zap.Int64("chatID", chatID.ID), zap.String("url", env.MiniAppURL))
 		}
 	}
 }
@@ -204,9 +195,8 @@ func handleHelpCommand(chatID telego.ChatID, threadID int) {
 	_ = SendReply(chatID, threadID, helpText)
 }
 
-// --- Refactored SendReply function for Telego ---
 func SendReply(chatID telego.ChatID, threadID int, rawText string) error {
-	theBot := notifications.GetBotInstance() // Must return *telego.Bot
+	theBot := notifications.GetBotInstance()
 	if theBot == nil {
 		log.Println("ERROR: Cannot send reply, bot instance (telego) is nil.")
 		return errors.New("bot instance is nil")
@@ -229,7 +219,6 @@ func SendReply(chatID telego.ChatID, threadID int, rawText string) error {
 		log.Printf("ERROR: Failed to send Telego reply to chat %d (thread %d): %v. Original Text: %s", chatID.ID, threadID, err, rawText)
 		if appLogger != nil {
 			logArgs := []interface{}{"chatID", chatID.ID, "threadID", threadID, "error", err, "originalText", rawText}
-			// Add specific Telego error checking here if needed
 			appLogger.Zap().Errorw("Failed to send reply via Telego SendMessage", logArgs...)
 		}
 	}
