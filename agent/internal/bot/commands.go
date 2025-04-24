@@ -106,9 +106,9 @@ func HandleCommand(update telego.Update, command, args string) { // Update param
 }
 
 func handleVerifyCommand(chatID telego.ChatID, threadID int) {
-	miniAppURL := "https://YOUR_MINI_APP_HOSTING_URL/" // Example placeholder
+	miniAppURL := "trench-bot-frontend-app-production.up.railway.app/" // Example placeholder
 
-	if miniAppURL == "https://YOUR_MINI_APP_HOSTING_URL/" || miniAppURL == "" {
+	if miniAppURL == "trench-bot-frontend-app-production.up.railway.app/" || miniAppURL == "" {
 		log.Println("ERROR: Mini App URL is not configured in handleVerifyCommand!")
 		if appLogger != nil {
 			appLogger.Error("Mini App URL is not configured")
