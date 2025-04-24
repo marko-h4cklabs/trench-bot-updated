@@ -10,7 +10,7 @@ import (
 
 var (
 	TelegramBotToken string
-	TelegramGroupID  int64 // Stays int64
+	TelegramGroupID  int64
 	BotCallsThreadID int
 	TrackingThreadID int
 
@@ -28,11 +28,12 @@ var (
 	NFTCollectionAddress string
 	NFTMinimumHolding    int
 
-	PGHOST       string
-	PGPORT       string
-	PGUSER       string
-	PGPASSWORD   string
-	PGDATABASE   string
+	PGHOST     string
+	PGPORT     string
+	PGUSER     string
+	PGPASSWORD string
+	PGDATABASE string
+
 	DATABASE_URL string
 
 	LOCAL_DATABASE_HOST     string
@@ -42,7 +43,6 @@ var (
 	LOCAL_DATABASE_NAME     string
 )
 
-// loadEnvVariable remains the same
 func loadEnvVariable(key string, isRequired bool) string {
 	value := os.Getenv(key)
 	if isRequired && value == "" {
@@ -61,8 +61,7 @@ func loadEnvVariable(key string, isRequired bool) string {
 	return value
 }
 
-// loadIntEnv for standard integers
-func loadIntEnv(key string, required bool) int { // Removed isGroupID parameter
+func loadIntEnv(key string, required bool) int {
 	strValue := loadEnvVariable(key, required)
 	if strValue == "" {
 		if !required {
@@ -70,7 +69,7 @@ func loadIntEnv(key string, required bool) int { // Removed isGroupID parameter
 			return 0
 		}
 		log.Fatalf("FATAL: Required integer environment variable %s is missing after load.", key)
-		return 0 // Should not be reached
+		return 0
 	}
 
 	id, err := strconv.Atoi(strValue)
@@ -80,7 +79,6 @@ func loadIntEnv(key string, required bool) int { // Removed isGroupID parameter
 	return id
 }
 
-// --- NEW: Specific function to load int64 ---
 func loadInt64Env(key string, required bool) int64 {
 	strValue := loadEnvVariable(key, required)
 	if strValue == "" {
@@ -89,17 +87,15 @@ func loadInt64Env(key string, required bool) int64 {
 			return 0
 		}
 		log.Fatalf("FATAL: Required int64 environment variable %s is missing after load.", key)
-		return 0 // Should not be reached
+		return 0
 	}
 
-	id, err := strconv.ParseInt(strValue, 10, 64) // Parse directly as int64
+	id, err := strconv.ParseInt(strValue, 10, 64)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to parse int64 environment variable %s='%s': %v", key, strValue, err)
 	}
-	return id // Return the parsed int64
+	return id
 }
-
-// --- End new function ---
 
 func LoadEnv() error {
 	err := godotenv.Load()
@@ -128,9 +124,7 @@ func LoadEnv() error {
 		log.Printf("INFO: PORT not set, defaulting to %s", Port)
 	}
 
-	// --- CORRECTED: Use loadInt64Env for TelegramGroupID ---
 	TelegramGroupID = loadInt64Env("TELEGRAM_GROUP_ID", true)
-	// --- Use standard loadIntEnv for thread IDs (assuming they fit in int) ---
 	BotCallsThreadID = loadIntEnv("BOT_CALLS_THREAD_ID", false)
 	TrackingThreadID = loadIntEnv("TRACKING_THREAD_ID", false)
 
@@ -149,17 +143,23 @@ func LoadEnv() error {
 		log.Printf("INFO: NFT Minimum Holding required for verification: %d", NFTMinimumHolding)
 	}
 
+	DATABASE_URL = loadEnvVariable("DATABASE_URL", true)
+
 	PGHOST = loadEnvVariable("PGHOST", false)
 	PGPORT = loadEnvVariable("PGPORT", false)
 	PGUSER = loadEnvVariable("PGUSER", false)
 	PGPASSWORD = loadEnvVariable("PGPASSWORD", false)
 	PGDATABASE = loadEnvVariable("PGDATABASE", false)
-	DATABASE_URL = loadEnvVariable("DATABASE_URL", false)
-	LOCAL_DATABASE_HOST = loadEnvVariable("LOCAL_DATABASE_HOST", true)
-	LOCAL_DATABASE_PORT = loadEnvVariable("LOCAL_DATABASE_PORT", true)
-	LOCAL_DATABASE_USER = loadEnvVariable("LOCAL_DATABASE_USER", true)
-	LOCAL_DATABASE_PASSWORD = loadEnvVariable("LOCAL_DATABASE_PASSWORD", true)
-	LOCAL_DATABASE_NAME = loadEnvVariable("LOCAL_DATABASE_NAME", true)
+
+	LOCAL_DATABASE_HOST = loadEnvVariable("LOCAL_DATABASE_HOST", false)
+	LOCAL_DATABASE_PORT = loadEnvVariable("LOCAL_DATABASE_PORT", false)
+	LOCAL_DATABASE_USER = loadEnvVariable("LOCAL_DATABASE_USER", false)
+	LOCAL_DATABASE_PASSWORD = loadEnvVariable("LOCAL_DATABASE_PASSWORD", false)
+	LOCAL_DATABASE_NAME = loadEnvVariable("LOCAL_DATABASE_NAME", false)
+
+	if DATABASE_URL == "" {
+		log.Println("WARN: DATABASE_URL is not set. Connection logic might rely on PG* or LOCAL_* variables.")
+	}
 
 	if TelegramBotToken != "" && TelegramGroupID == 0 {
 		log.Println("WARN: TELEGRAM_BOT_TOKEN is set, but TELEGRAM_GROUP_ID is missing, invalid, or zero.")

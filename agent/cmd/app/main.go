@@ -16,7 +16,6 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 )
 
@@ -36,12 +35,6 @@ func main() {
 			log.Panicf("FATAL PANIC RECOVERY: %v", r)
 		}
 	}()
-
-	if err := godotenv.Load(".env"); err != nil {
-		log.Println("INFO: .env file not found or failed to load.")
-	} else {
-		log.Println("INFO: .env file loaded successfully.")
-	}
 
 	if err := env.LoadEnv(); err != nil {
 		log.Fatalf("FATAL: Failed to load environment variables: %v", err)
@@ -68,31 +61,36 @@ func main() {
 		appLogger.Info("Using DATABASE_URL for database connection.")
 		dsn = env.DATABASE_URL
 	} else {
-		appLogger.Info("DATABASE_URL not found, constructing DSN from individual variables.")
+		appLogger.Warn("DATABASE_URL not set. Attempting to construct DSN from PG* or LOCAL_* variables.")
 		dbHost := env.PGHOST
 		dbPort := env.PGPORT
 		dbUser := env.PGUSER
 		dbPassword := env.PGPASSWORD
 		dbName := env.PGDATABASE
 
-		if dbHost == "" {
+		if dbHost == "" && env.LOCAL_DATABASE_HOST != "" {
+			appLogger.Info("Falling back to LOCAL_DATABASE_HOST")
 			dbHost = env.LOCAL_DATABASE_HOST
 		}
-		if dbPort == "" {
+		if dbPort == "" && env.LOCAL_DATABASE_PORT != "" {
+			appLogger.Info("Falling back to LOCAL_DATABASE_PORT")
 			dbPort = env.LOCAL_DATABASE_PORT
 		}
-		if dbUser == "" {
+		if dbUser == "" && env.LOCAL_DATABASE_USER != "" {
+			appLogger.Info("Falling back to LOCAL_DATABASE_USER")
 			dbUser = env.LOCAL_DATABASE_USER
 		}
-		if dbPassword == "" {
+		if dbPassword == "" && env.LOCAL_DATABASE_PASSWORD != "" {
+			appLogger.Info("Falling back to LOCAL_DATABASE_PASSWORD (value hidden)")
 			dbPassword = env.LOCAL_DATABASE_PASSWORD
 		}
-		if dbName == "" {
+		if dbName == "" && env.LOCAL_DATABASE_NAME != "" {
+			appLogger.Info("Falling back to LOCAL_DATABASE_NAME")
 			dbName = env.LOCAL_DATABASE_NAME
 		}
 
-		if dbHost == "" || dbPort == "" || dbUser == "" || dbPassword == "" || dbName == "" {
-			appLogger.Fatal("Essential database connection variables are missing from the environment (checked PG* and LOCAL_*).")
+		if dbHost == "" || dbPort == "" || dbUser == "" || dbName == "" {
+			appLogger.Fatal("Essential database connection variables are missing (DATABASE_URL, PG*, LOCAL_*)")
 		}
 
 		dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=UTC",
@@ -165,14 +163,12 @@ func main() {
 	router.Use(cors.New(corsConfig))
 	appLogger.Info("CORS middleware configured.")
 
-	handlers.RegisterRoutes(router, appLogger /*, db */)
+	handlers.RegisterRoutes(router, appLogger)
 	handlers.RegisterAPIRoutes(router, appLogger, db)
 	appLogger.Info("Web server and API routes registered.")
 
 	appLogger.Info("Starting background services...")
 	go services.CheckTokenProgress(appLogger)
-	// go services.ValidateAndNotifyCachedSwaps(appLogger, db)
-	// go services.CleanSwapCachePeriodically(appLogger)
 	appLogger.Info("Background services started.")
 
 	go func() {
@@ -184,7 +180,6 @@ func main() {
 	}()
 
 	appLogger.Info("Running startup tests...")
-	// tests.RunStartupTests(appLogger, db)
 	appLogger.Info("Startup tests completed (or skipped).")
 
 	appLogger.Info("Starting heartbeat monitor.")
