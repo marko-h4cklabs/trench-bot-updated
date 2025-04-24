@@ -48,7 +48,7 @@ func main() {
 	}
 	log.Println("INFO: Environment variables loaded via shared/env.")
 
-	log.Println("INFO: Initializing application logger...")
+	log.Println("INFO: Initializing application logger.")
 	appEnv := "production"
 	logLevel := "info"
 	enableTelegramLogging := env.TelegramBotToken != "" && env.TelegramGroupID != 0
