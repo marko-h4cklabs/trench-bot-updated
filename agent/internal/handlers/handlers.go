@@ -24,15 +24,6 @@ func RegisterRoutes(router *gin.Engine, appLogger *logger.Logger) {
 		c.JSON(http.StatusOK, gin.H{"message": "API is running. Scanner active!"})
 	})
 
-	// --- Helius webhook registration REMOVED from here ---
-	/*
-		webhookGroup := router.Group("/webhook")
-		{
-			webhookGroup.GET("/", func(c *gin.Context) { ... })
-			webhookGroup.POST("/helius", func(c *gin.Context) { ... }) // <-- REMOVED
-			webhookGroup.POST("/test", func(c *gin.Context) { ... })
-		}
-	*/
 }
 
 // Registers routes under the /api/v1 path prefix
