@@ -163,7 +163,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 		}
 
 		statusCode := resp.StatusCode
-		statusField := zap.Int("status", statusCode)
+		statusField := zap.Int("status.", statusCode)
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
