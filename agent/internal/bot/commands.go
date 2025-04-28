@@ -1,7 +1,7 @@
 package bot
 
 import (
-	"ca-scraper/shared/env" // Ensure env package is imported
+	"ca-scraper/shared/env"
 	"ca-scraper/shared/notifications"
 	"context"
 	"errors"
@@ -11,14 +11,11 @@ import (
 
 	"github.com/mymmrac/telego"
 	"go.uber.org/zap"
-	// Your other necessary imports...
-	// "ca-scraper/agent/database" // If needed for verification checks
+	// database "ca-scraper/agent/database" // Uncomment if/when needed for verification checks
 )
 
-// Assume appLogger and dbInstance are accessible package-level variables
-
 func getThreadIDFromUpdate(update telego.Update) int {
-	var threadID int // Default to 0
+	var threadID int
 	if update.Message != nil {
 		if update.Message.MessageThreadID != 0 {
 			return update.Message.MessageThreadID
@@ -59,8 +56,8 @@ func HandleCommand(update telego.Update, command, args string) {
 		appLogger.Debug("Checking user verification status", zap.Int64("userID", userID))
 		// *** Replace with your actual database call using dbInstance ***
 		// Example: isVerified, err := database.IsUserVerified(dbInstance, userID)
-		isVerified := false // Placeholder
-		var err error = nil // Placeholder
+		isVerified := false
+		var err error = nil
 
 		if err != nil {
 			appLogger.Error("Database error checking user verification status", zap.Error(err), zap.Int64("userID", userID))
@@ -79,7 +76,9 @@ func HandleCommand(update telego.Update, command, args string) {
 
 	switch command {
 	case "verify":
-		handleVerifyCommand(chatID, threadID) // Uses the updated function below
+		// --- FIX: Pass userID here ---
+		handleVerifyCommand(chatID, threadID, userID)
+		// ---------------------------
 	case "whitelist":
 		handleWhitelistCommand(chatID, threadID, args)
 	case "walletupdate":
@@ -95,11 +94,9 @@ func HandleCommand(update telego.Update, command, args string) {
 	}
 }
 
-// --- UPDATED handleVerifyCommand ---
-func handleVerifyCommand(chatID telego.ChatID, threadID int) {
-	// Use the Mini App URL loaded from the environment
+// --- handleVerifyCommand definition remains the same (as provided previously) ---
+func handleVerifyCommand(chatID telego.ChatID, threadID int, userID int64) {
 	if env.MiniAppURL == "" {
-		// This check is a safeguard; LoadEnv should have caught this if required=true
 		log.Println("ERROR: MINI_APP_URL environment variable is not set or empty in handleVerifyCommand!")
 		if appLogger != nil {
 			appLogger.Error("MINI_APP_URL environment variable is missing or empty")
@@ -108,9 +105,11 @@ func handleVerifyCommand(chatID telego.ChatID, threadID int) {
 		return
 	}
 
-	webApp := &telego.WebAppInfo{URL: env.MiniAppURL} // Use the loaded env var
+	verificationURL := fmt.Sprintf("%s?tgUserId=%d", env.MiniAppURL, userID)
+
+	webApp := &telego.WebAppInfo{URL: verificationURL}
 	button := telego.InlineKeyboardButton{
-		Text:   "🔒 Connect Wallet & Verify NFTs",
+		Text:   "✅ Verify Wallet Holdings",
 		WebApp: webApp,
 	}
 	keyboard := &telego.InlineKeyboardMarkup{
@@ -132,7 +131,9 @@ func handleVerifyCommand(chatID telego.ChatID, threadID int) {
 	theBot := notifications.GetBotInstance()
 	if theBot == nil {
 		log.Println("ERROR: Bot instance nil in handleVerifyCommand")
-		_ = SendReply(chatID, threadID, "Error: Could not initialize verification process. Please contact an admin.")
+		if appLogger != nil {
+			appLogger.Error("Bot instance nil in handleVerifyCommand", zap.Int64("chatID", chatID.ID))
+		}
 		return
 	}
 
@@ -142,14 +143,15 @@ func handleVerifyCommand(chatID telego.ChatID, threadID int) {
 		if appLogger != nil {
 			appLogger.Error("Failed to send verify command reply", zap.Error(err), zap.Int64("chatID", chatID.ID))
 		}
-		_ = SendReply(chatID, threadID, "Could not display the verification button. Please try using the `/verify` command again later.")
 	} else {
 		if appLogger != nil {
-			appLogger.Info("Verify prompt with button sent successfully", zap.Int64("chatID", chatID.ID), zap.String("url", env.MiniAppURL))
+			appLogger.Info("Verify prompt with button sent successfully", zap.Int64("chatID", chatID.ID), zap.Int64("userID", userID), zap.String("url", verificationURL))
 		}
 	}
 }
 
+// --- Other handler functions (handleWhitelistCommand, etc.) remain the same ---
+// --- SendReply function remains the same ---
 func handleWhitelistCommand(chatID telego.ChatID, threadID int, args string) {
 	wallet := strings.TrimSpace(args)
 	if wallet == "" {

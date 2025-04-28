@@ -43,6 +43,9 @@ var (
 	LOCAL_DATABASE_USER     string
 	LOCAL_DATABASE_PASSWORD string
 	LOCAL_DATABASE_NAME     string
+
+	TargetGroupLink   string
+	FrontendAPISecret string
 )
 
 func loadEnvVariable(key string, isRequired bool) string {
@@ -50,7 +53,7 @@ func loadEnvVariable(key string, isRequired bool) string {
 	if isRequired && value == "" {
 		log.Fatalf("FATAL: Environment variable %s is required but not set.", key)
 	}
-	isHidden := key == "TELEGRAM_BOT_TOKEN" || key == "HELIUS_API_KEY" || key == "WEBHOOK_SECRET" || key == "LOCAL_DATABASE_PASSWORD" || key == "PGPASSWORD" || key == "DATABASE_URL" || key == "MINI_APP_URL"
+	isHidden := key == "TELEGRAM_BOT_TOKEN" || key == "HELIUS_API_KEY" || key == "WEBHOOK_SECRET" || key == "LOCAL_DATABASE_PASSWORD" || key == "PGPASSWORD" || key == "DATABASE_URL" || key == "FRONTEND_API_SECRET"
 	if value == "" {
 		if !isRequired {
 			log.Printf("INFO: Environment variable %s is not set.", key)
@@ -73,7 +76,6 @@ func loadIntEnv(key string, required bool) int {
 		log.Fatalf("FATAL: Required integer environment variable %s is missing after load.", key)
 		return 0
 	}
-
 	id, err := strconv.Atoi(strValue)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to parse integer environment variable %s='%s': %v", key, strValue, err)
@@ -91,7 +93,6 @@ func loadInt64Env(key string, required bool) int64 {
 		log.Fatalf("FATAL: Required int64 environment variable %s is missing after load.", key)
 		return 0
 	}
-
 	id, err := strconv.ParseInt(strValue, 10, 64)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to parse int64 environment variable %s='%s': %v", key, strValue, err)
@@ -146,6 +147,8 @@ func LoadEnv() error {
 	}
 
 	MiniAppURL = loadEnvVariable("MINI_APP_URL", true)
+	TargetGroupLink = loadEnvVariable("TARGET_GROUP_LINK", true)
+	FrontendAPISecret = loadEnvVariable("FRONTEND_API_SECRET", false)
 
 	DATABASE_URL = loadEnvVariable("DATABASE_URL", true)
 
@@ -164,11 +167,15 @@ func LoadEnv() error {
 	if DATABASE_URL == "" {
 		log.Println("WARN: DATABASE_URL is not set. Connection logic might rely on PG* or LOCAL_* variables.")
 	}
-
 	if MiniAppURL == "" {
-		log.Println("WARN: MINI_APP_URL is required but was not loaded correctly.")
+		log.Println("FATAL: MINI_APP_URL is required but was not loaded correctly.") // Made Fatal
 	}
-
+	if TargetGroupLink == "" {
+		log.Println("FATAL: TARGET_GROUP_LINK is required but was not loaded correctly.") // Made Fatal
+	}
+	if FrontendAPISecret == "" {
+		log.Println("WARN: FRONTEND_API_SECRET is not set. The verification callback endpoint will be unsecured.")
+	}
 	if TelegramBotToken != "" && TelegramGroupID == 0 {
 		log.Println("WARN: TELEGRAM_BOT_TOKEN is set, but TELEGRAM_GROUP_ID is missing, invalid, or zero.")
 	}

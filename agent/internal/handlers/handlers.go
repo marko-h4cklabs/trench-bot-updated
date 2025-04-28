@@ -2,31 +2,38 @@ package handlers
 
 import (
 	"bytes"
-	"ca-scraper/agent/database"
-	"ca-scraper/agent/internal/services"
+	"ca-scraper/agent/database"          // Keep if handleVerifyNFT is used
+	"ca-scraper/agent/internal/services" // Keep for HandleWebhook, TestHeliusConnection
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
+	"ca-scraper/shared/notifications" // <-- Import notifications
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mymmrac/telego" // <-- Import telego
 	"go.uber.org/zap"
-	"gorm.io/gorm"
+	"gorm.io/gorm" // Keep if handleVerifyNFT is used
 )
 
-// Registers non-API specific routes (like root path)
-func RegisterRoutes(router *gin.Engine, appLogger *logger.Logger) {
+type MarkVerifiedRequest struct {
+	UserID int64 `json:"userId" binding:"required"`
+}
 
+type VerifyNFTRequest struct {
+	TelegramUserID int64  `json:"telegramUserId" binding:"required"`
+	WalletAddress  string `json:"walletAddress" binding:"required"`
+}
+
+func RegisterRoutes(router *gin.Engine, appLogger *logger.Logger) {
 	router.GET("/", func(c *gin.Context) {
 		appLogger.Info("Root endpoint accessed")
 		c.JSON(http.StatusOK, gin.H{"message": "API is running. Scanner active!"})
 	})
-
 }
 
-// Registers routes under the /api/v1 path prefix
 func RegisterAPIRoutes(router *gin.Engine, appLogger *logger.Logger, db *gorm.DB) {
 	apiGroup := router.Group("/api/v1")
 	{
@@ -35,18 +42,16 @@ func RegisterAPIRoutes(router *gin.Engine, appLogger *logger.Logger, db *gorm.DB
 			c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "API Service is running"})
 		})
 
-		// Pass db instance to the handler factory for NFT verification
-		apiGroup.POST("/verify-nft", handleVerifyNFT(appLogger, db))
+		// Remove or keep this depending on if you need the old direct verification flow
+		// apiGroup.POST("/verify-nft", handleVerifyNFT(appLogger, db))
 
 		apiGroup.GET("/testHelius", func(c *gin.Context) {
 			appLogger.Info("/api/v1/testHelius endpoint called")
 			TestHeliusConnection(c, appLogger)
 		})
 
-		// --- ADDED HELIUS WEBHOOK REGISTRATION HERE ---
-		apiGroup.POST("/webhook", func(c *gin.Context) { // <-- Path changed to /webhook (full path: /api/v1/webhook)
+		apiGroup.POST("/webhook", func(c *gin.Context) {
 			requestID := zap.String("requestID", generateRequestID())
-			// Log the correct path now
 			appLogger.Info("POST /api/v1/webhook (Helius) endpoint received request", requestID)
 
 			expectedAuthHeader := env.HeliusAuthHeader
@@ -73,37 +78,25 @@ func RegisterAPIRoutes(router *gin.Engine, appLogger *logger.Logger, db *gorm.DB
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload"})
 				return
 			}
-			// Important: Replace the request body so it can be read again if needed by subsequent middleware/handlers (though likely not needed here)
 			c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
 
 			appLogger.Info("Webhook Payload Received", zap.Int("size", len(body)), requestID)
-			// Use Debug level for potentially large payloads
 			appLogger.Debug("Webhook Payload", zap.ByteString("payload", body), requestID)
 
-			// Pass the body to the service handler
-			err = services.HandleWebhook(body, appLogger) // Assuming HandleWebhook processes the raw body
+			err = services.HandleWebhook(body, appLogger)
 			if err != nil {
-				// Log the specific error from processing
 				appLogger.Error("Error processing webhook payload in service", zap.Error(err), requestID)
-				// Still return 200 OK to Helius so it doesn't retry constantly,
-				// but indicate processing error in the message.
 				c.JSON(http.StatusOK, gin.H{"message": "Webhook received, but processing encountered an error"})
 				return
 			}
 
-			// Success message
 			c.JSON(http.StatusOK, gin.H{"message": "Webhook received and processing initiated"})
 		})
-		// --- END HELIUS WEBHOOK REGISTRATION ---
+
+		apiGroup.POST("/mark-verified", handleMarkVerified(appLogger, notifications.GetBotInstance()))
 
 	}
 	appLogger.Info("API routes registered under /api/v1")
-}
-
-// --- handleVerifyNFT function remains the same ---
-type VerifyNFTRequest struct {
-	TelegramUserID int64  `json:"telegramUserId" binding:"required"`
-	WalletAddress  string `json:"walletAddress" binding:"required"`
 }
 
 func handleVerifyNFT(appLogger *logger.Logger, db *gorm.DB) gin.HandlerFunc {
@@ -128,7 +121,7 @@ func handleVerifyNFT(appLogger *logger.Logger, db *gorm.DB) gin.HandlerFunc {
 		}
 
 		if hasEnoughNFTs {
-			err := database.MarkUserAsVerified(db, req.TelegramUserID)
+			err := database.MarkUserAsVerified(db, req.TelegramUserID) // Assuming this function exists
 			if err != nil {
 				appLogger.Error("Failed to mark user as verified in DB", zap.Error(err), userIdField)
 				c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "Verification status update failed"})
@@ -149,7 +142,58 @@ func handleVerifyNFT(appLogger *logger.Logger, db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// --- TestHeliusConnection function remains the same ---
+func handleMarkVerified(appLogger *logger.Logger, botInstance *telego.Bot) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		reqID := zap.String("requestID", generateRequestID())
+		appLogger.Info("Received request on /mark-verified endpoint", reqID)
+
+		if env.FrontendAPISecret != "" {
+			providedSecret := c.GetHeader("X-Verification-Secret")
+			if providedSecret != env.FrontendAPISecret {
+				appLogger.Warn("Unauthorized attempt to call /mark-verified: Invalid or missing secret", reqID, zap.String("remoteAddr", c.RemoteIP()))
+				c.JSON(http.StatusUnauthorized, gin.H{"success": false, "error": "Unauthorized"})
+				return
+			}
+			appLogger.Info("Frontend API Secret verified successfully", reqID)
+		} else {
+			appLogger.Warn("No FRONTEND_API_SECRET configured. Accepting /mark-verified call without secret check.", reqID)
+		}
+
+		var req MarkVerifiedRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			appLogger.Warn("Invalid request body for /mark-verified", zap.Error(err), reqID, zap.String("remoteAddr", c.RemoteIP()))
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "Invalid request body"})
+			return
+		}
+
+		userIdField := zap.Int64("telegramUserId", req.UserID)
+		appLogger.Info("Processing successful verification callback from frontend", userIdField, reqID)
+
+		if botInstance == nil {
+			appLogger.Error("Cannot send success message: Bot instance is nil", userIdField, reqID)
+			c.JSON(http.StatusInternalServerError, gin.H{"success": true, "message": "Verification received, but bot notification failed."})
+			return
+		}
+
+		if env.TargetGroupLink == "" {
+			appLogger.Error("Cannot send success message: TARGET_GROUP_LINK is not configured", userIdField, reqID)
+			c.JSON(http.StatusInternalServerError, gin.H{"success": true, "message": "Verification received, but group link is missing."})
+			return
+		}
+
+		// --- Make sure notifications package is imported correctly ---
+		err := notifications.SendVerificationSuccessMessage(req.UserID, env.TargetGroupLink)
+		if err != nil {
+			appLogger.Error("Failed to send verification success message to user", zap.Error(err), userIdField, reqID)
+			c.JSON(http.StatusInternalServerError, gin.H{"success": true, "message": "Verification received, but failed to send Telegram confirmation."})
+			return
+		}
+
+		appLogger.Info("Successfully processed verification callback and sent group link.", userIdField, reqID)
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Verification confirmed."})
+	}
+}
+
 func TestHeliusConnection(c *gin.Context, appLogger *logger.Logger) {
 	appLogger.Info("Executing Helius connection test...")
 	apiKey := env.HeliusAPIKey
@@ -158,6 +202,7 @@ func TestHeliusConnection(c *gin.Context, appLogger *logger.Logger) {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Server configuration error: Helius API Key missing."})
 		return
 	}
+	// Assuming CheckExistingHeliusWebhook exists in services package
 	_, err := services.CheckExistingHeliusWebhook("http://dummy-helius-check.invalid", appLogger)
 	if err != nil {
 		appLogger.Error("Helius connection test failed.", zap.Error(err))
@@ -168,7 +213,6 @@ func TestHeliusConnection(c *gin.Context, appLogger *logger.Logger) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "Helius connection test successful (authentication check passed)."})
 }
 
-// --- generateRequestID function remains the same ---
 func generateRequestID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }

@@ -7,18 +7,18 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net/url" // Keep for photo URL validation
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/mymmrac/telego"           // Import telego
-	"github.com/mymmrac/telego/telegoapi" // Import telegoapi for error checking
-	"golang.org/x/time/rate"              // Keep rate limiter
+	"github.com/mymmrac/telego"
+	"github.com/mymmrac/telego/telegoapi"
+	"golang.org/x/time/rate"
 )
 
 var (
-	bot             *telego.Bot // Use Telego type
+	bot             *telego.Bot
 	telegramLimiter *rate.Limiter
 	initMutex       sync.Mutex
 	isInitialized   bool
@@ -33,7 +33,6 @@ const (
 	maxRetryWait              = 60 * time.Second
 )
 
-// InitTelegramBot using Telego
 func InitTelegramBot() error {
 	initMutex.Lock()
 	defer initMutex.Unlock()
@@ -91,7 +90,6 @@ func InitTelegramBot() error {
 	return nil
 }
 
-// GetBotInstance returns *telego.Bot
 func GetBotInstance() *telego.Bot {
 	initMutex.Lock()
 	defer initMutex.Unlock()
@@ -102,7 +100,6 @@ func GetBotInstance() *telego.Bot {
 	return bot
 }
 
-// EscapeMarkdownV2 remains the same
 func EscapeMarkdownV2(s string) string {
 	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	temp := s
@@ -112,7 +109,6 @@ func EscapeMarkdownV2(s string) string {
 	return temp
 }
 
-// Core sending function refactored for Telego, including retries
 func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string) error {
 	localBot := GetBotInstance()
 	if localBot == nil {
@@ -145,10 +141,10 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 			}
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Timeout for API call
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
 		var currentErr error
-		var sentMsg *telego.Message // To check success
+		var sentMsg *telego.Message
 
 		if isPhoto {
 			params := &telego.SendPhotoParams{
@@ -168,28 +164,26 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 			}
 			sentMsg, currentErr = localBot.SendMessage(ctx, params)
 		}
-		cancel() // Cancel context after API call attempt
+		cancel()
 
 		if currentErr == nil && sentMsg != nil {
-			return nil // Success!
+			return nil
 		}
 
-		// --- Error Handling & Retry Logic ---
-		lastErr = currentErr // Store the last error encountered
+		lastErr = currentErr
 		shouldRetry := false
 		specificRetryAfter := 0
 
 		if currentErr != nil {
-			var apiErr *telegoapi.Error // Check if it's a Telego API error
+			var apiErr *telegoapi.Error
 			if errors.As(currentErr, &apiErr) {
-				// --- Use apiErr.ErrorCode instead of apiErr.Code ---
 				log.Printf("ERROR: Failed Telegram send (Attempt %d/%d): API Err %d - %s %s",
 					attempt+1, maxRetries, apiErr.ErrorCode, apiErr.Description, logCtx)
 
-				if apiErr.ErrorCode == 429 && apiErr.Parameters != nil { // Rate Limit
+				if apiErr.ErrorCode == 429 && apiErr.Parameters != nil {
 					specificRetryAfter = apiErr.Parameters.RetryAfter
 					shouldRetry = true
-				} else if apiErr.ErrorCode == 400 { // Bad Request
+				} else if apiErr.ErrorCode == 400 {
 					nonRetryableSubstrings := []string{"thread not found", "can't parse entities", "chat not found", "wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "wrong type of chat"}
 					isNonRetryable := false
 					for _, sub := range nonRetryableSubstrings {
@@ -209,14 +203,14 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 						shouldRetry = false
 						log.Printf("WARN: Potentially non-retryable Telegram API error 400: %s. Aborting retry. %s", apiErr.Description, logCtx)
 					}
-				} else if apiErr.ErrorCode == 403 || apiErr.ErrorCode == 401 || apiErr.ErrorCode == 404 { // Auth/Permissions/Not Found
+				} else if apiErr.ErrorCode == 403 || apiErr.ErrorCode == 401 || apiErr.ErrorCode == 404 {
 					shouldRetry = false
 					log.Printf("WARN: Non-retryable Telegram API error %d: %s. Aborting retries. %s", apiErr.ErrorCode, apiErr.Description, logCtx)
 				} else {
 					shouldRetry = true
 					log.Printf("INFO: Retrying potentially temporary Telegram API error %d: %s %s", apiErr.ErrorCode, apiErr.Description, logCtx)
 				}
-			} else { // Network errors or other non-API errors
+			} else {
 				log.Printf("ERROR: Failed Telegram send (Attempt %d/%d): Network/Other error: %v %s",
 					attempt+1, maxRetries, currentErr, logCtx)
 				shouldRetry = true
@@ -244,7 +238,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 
 		log.Printf("INFO: Retrying failed Telegram send in %v... %s", waitDuration, logCtx)
 		time.Sleep(waitDuration)
-	} // End retry loop
+	}
 
 	if lastErr != nil {
 		log.Printf("ERROR: Telegram message FAILED to send after %d retries. Last Error: %v. %s", maxRetries, lastErr, logCtx)
@@ -262,7 +256,6 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 	return lastErr
 }
 
-// Public sending functions call the refactored coreSendMessageWithRetry
 func SendTelegramMessage(message string) {
 	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "")
 }
@@ -293,4 +286,37 @@ func SendTrackingUpdateMessage(message string) {
 		return
 	}
 	_ = coreSendMessageWithRetry(defaultGroupID, env.TrackingThreadID, message, false, "")
+}
+
+func SendVerificationSuccessMessage(userID int64, groupLink string) error {
+	if groupLink == "" {
+		log.Println("ERROR: Attempted to send success message, but group link is empty.")
+		return errors.New("target group link is empty")
+	}
+
+	escapedGroupLink := EscapeMarkdownV2(groupLink)
+	messageText := fmt.Sprintf("✅ Verification Successful\\! You now have access\\.\n\nJoin the group here: [Click to Join](%s)", escapedGroupLink)
+
+	localBot := GetBotInstance()
+	if localBot == nil {
+		log.Printf("ERROR: Cannot send verification success message to user %d: Bot instance is nil.", userID)
+		return errors.New("bot instance is nil")
+	}
+
+	params := &telego.SendMessageParams{
+		ChatID:    telego.ChatID{ID: userID},
+		Text:      messageText,
+		ParseMode: telego.ModeMarkdownV2,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := localBot.SendMessage(ctx, params)
+	if err != nil {
+		log.Printf("ERROR: Failed to send verification success message to user %d: %v", userID, err)
+	} else {
+		log.Printf("INFO: Verification success message sent to user %d.", userID)
+	}
+	return err
 }
