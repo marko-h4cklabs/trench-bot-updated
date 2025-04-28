@@ -488,8 +488,8 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 
 					// Format message using ATH level and the highest recorded MC
 					progressMessage := fmt.Sprintf(
-						"🚀 Token `%s` \n"+ // Use the calculated integer level (2x, 3x, 4x...)
-							"hit: *%d* \n"+
+						"🚀 Token `%s` \n\n"+ // Use the calculated integer level (2x, 3x, 4x...)
+							"hit: *%dx* \n\n"+
 							"Initial marketcap: `$%.0f`\n"+
 							"ATH marketcap: `$%.0f`\n\n"+ // Report highest MC achieved
 							"DexScreener: %s",

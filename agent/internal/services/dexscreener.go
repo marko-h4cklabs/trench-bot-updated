@@ -25,13 +25,20 @@ var dexScreenerLimiter = rate.NewLimiter(rate.Limit(4.66), 5)
 const (
 	dexScreenerAPI        = "https://api.dexscreener.com/tokens/v1/solana"
 	globalCooldownSeconds = 100
-	minLiquidity          = 40000.0
-	minMarketCap          = 50000.0
-	maxMarketCap          = 300000.0
-	min5mVolume           = 1000.0
-	min1hVolume           = 10000.0
-	min5mTx               = 100
-	min1hTx               = 500
+
+	minLiquidity = 30000.0
+	minMarketCap = 50000.0
+	min5mVolume  = 1000.0
+	min1hVolume  = 10000.0
+	min5mTx      = 100
+	min1hTx      = 500
+
+	maxLiquidity = 55000.0  // NEW
+	maxMarketCap = 300000.0 // Existing upper bound for market cap
+	max5mVolume  = 50000.0  // NEW
+	max1hVolume  = 200000.0 // NEW
+	max5mTx      = 400      // NEW
+	max1hTx      = 1200     // NEW
 )
 
 var (
@@ -257,6 +264,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			meetsCriteria := true
 			failReasons := []string{}
 
+			// --- Minimum Checks ---
 			if result.LiquidityUSD < minLiquidity {
 				meetsCriteria = false
 				failReasons = append(failReasons, fmt.Sprintf("Liquidity %.0f < %.0f", result.LiquidityUSD, minLiquidity))
@@ -264,10 +272,6 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			if result.MarketCap < minMarketCap {
 				meetsCriteria = false
 				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f < %.0f", result.MarketCap, minMarketCap))
-			}
-			if result.MarketCap > maxMarketCap {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f > %.0f", result.MarketCap, maxMarketCap))
 			}
 			if result.Volume5m < min5mVolume {
 				meetsCriteria = false
@@ -286,13 +290,39 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				failReasons = append(failReasons, fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx))
 			}
 
+			// --- Maximum Checks ---
+			if result.MarketCap > maxMarketCap { // Existing check, kept for clarity
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f > %.0f", result.MarketCap, maxMarketCap))
+			}
+			if result.LiquidityUSD > maxLiquidity { // NEW Check
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Liquidity %.0f > %.0f", result.LiquidityUSD, maxLiquidity))
+			}
+			if result.Volume5m > max5mVolume { // NEW Check
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Vol(5m) %.0f > %.0f", result.Volume5m, max5mVolume))
+			}
+			if result.Volume1h > max1hVolume { // NEW Check
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Vol(1h) %.0f > %.0f", result.Volume1h, max1hVolume))
+			}
+			if result.Txns5m > max5mTx { // NEW Check
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Tx(5m) %d > %d", result.Txns5m, max5mTx))
+			}
+			if result.Txns1h > max1hTx { // NEW Check
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Tx(1h) %d > %d", result.Txns1h, max1hTx))
+			}
+
 			result.IsValid = meetsCriteria
 			result.FailReasons = failReasons
 
 			if meetsCriteria {
-				appLogger.Debug("Token meets criteria", tokenField)
+				appLogger.Debug("Token meets criteria (including max limits)", tokenField)
 			} else {
-				appLogger.Debug("Token did not meet criteria", tokenField, zap.Strings("reasons", failReasons))
+				appLogger.Debug("Token did not meet criteria (min/max checks)", tokenField, zap.Strings("reasons", failReasons))
 			}
 
 			return result, nil
