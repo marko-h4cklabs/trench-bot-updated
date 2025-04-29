@@ -355,7 +355,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 				appLogger.Warn("Helius response missing 'content' field", tokenField)
 			}
 		} else {
-			appLogger.Warn("Helius response missing 'result' field", tokenField)
+			appLogger.Warn("Helius response missing 'result' field.", tokenField)
 		}
 	}
 	// --- END: Attempt to get better image URL from Helius ---
