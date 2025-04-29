@@ -400,7 +400,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				zap.Int("cooldownSeconds", globalCooldownSeconds),
 				zap.Error(lastErr))
 		} else {
-			appLogger.Info("Persistent DexScreener rate limit hit, but global cooldown already active.",
+			appLogger.Info("Persistent DexScreener rate limit hit, but global cooldown already active...",
 				tokenField,
 				zap.Time("coolDownUntil", currentCoolDownEnd))
 		}
