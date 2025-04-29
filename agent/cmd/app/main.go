@@ -175,7 +175,7 @@ func main() {
 		serverAddr := ":" + env.Port
 		appLogger.Info("Starting web server", zap.String("address", serverAddr))
 		if err := router.Run(serverAddr); err != nil {
-			appLogger.Fatal("Could not start web server", zap.Error(err))
+			appLogger.Fatal("Could not start web server.", zap.Error(err))
 		}
 	}()
 
