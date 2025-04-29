@@ -19,7 +19,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// ... (Struct definitions: TrackedTokenInfo, WebhookRequest, tokenCache, GraduatedTokenCache remain the same) ...
+// Struct definitions: TrackedTokenInfo, WebhookRequest, tokenCache, GraduatedTokenCache
 type TrackedTokenInfo struct {
 	BaselineMarketCap           float64
 	HighestMarketCapSeen        float64
@@ -53,7 +53,7 @@ type GraduatedTokenCache struct {
 
 var graduatedTokenCache = &GraduatedTokenCache{Data: make(map[string]time.Time)}
 
-// ... (SetupGraduationWebhook, HandleWebhook remain the same) ...
+// SetupGraduationWebhook, HandleWebhook implementations (unchanged from previous versions)
 
 func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	// ... (Implementation unchanged) ...
@@ -144,10 +144,11 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if webhookSecret != "" {
-		appLogger.Info("Sending Helius API key via query parameter.") // Or however auth works
+	// Note: Changed logging here slightly based on previous context
+	if authHeader != "" {
+		appLogger.Info("Setting Helius authHeader for webhook creation.", zap.Bool("authHeaderSet", true))
 	} else {
-		appLogger.Warn("WEBHOOK_SECRET is missing. Ensure API key in URL is sufficient for authentication.")
+		appLogger.Warn("HELIUS_AUTH_HEADER is not set for webhook creation.")
 	}
 
 	client := &http.Client{Timeout: 20 * time.Second}
@@ -240,7 +241,6 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 	if validationErr != nil {
 		appLogger.Error("Error checking DexScreener criteria for graduated token", tokenField, zap.Error(validationErr))
-		// Clean up debounce cache on persistent error? Maybe not, let retry happen.
 		return validationErr // Propagate the error
 	}
 
@@ -258,7 +258,6 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	appLogger.Info("Graduated token passed validation! Preparing notification...", tokenField)
 
 	// --- Build Criteria Section ---
-	// Using \n for newlines within this block
 	criteriaDetails := fmt.Sprintf(
 		"🩸 Liquidity: $%.0f\n"+
 			"🏛️ Market Cap: $%.0f\n"+
@@ -278,15 +277,15 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
 	if validationResult.WebsiteURL != "" {
-		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", validationResult.WebsiteURL)) // Raw URL
+		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", validationResult.WebsiteURL))
 		hasSocials = true
 	}
 	if validationResult.TwitterURL != "" {
-		socialLinksBuilder.WriteString(fmt.Sprintf("🐦 Twitter: %s\n", validationResult.TwitterURL)) // Raw URL
+		socialLinksBuilder.WriteString(fmt.Sprintf("🐦 Twitter: %s\n", validationResult.TwitterURL))
 		hasSocials = true
 	}
 	if validationResult.TelegramURL != "" {
-		socialLinksBuilder.WriteString(fmt.Sprintf("✈️ Telegram: %s\n", validationResult.TelegramURL)) // Raw URL
+		socialLinksBuilder.WriteString(fmt.Sprintf("✈️ Telegram: %s\n", validationResult.TelegramURL))
 		hasSocials = true
 	}
 	for name, url := range validationResult.OtherSocials {
@@ -294,58 +293,44 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 			emoji := "🔗"
 			lowerName := strings.ToLower(name)
 			if strings.Contains(lowerName, "discord") {
-				emoji = "👾" // Standard Discord emoji
+				emoji = "👾"
 			}
 			if strings.Contains(lowerName, "medium") {
 				emoji = "📰"
 			}
-			// Raw name, raw URL
 			socialLinksBuilder.WriteString(fmt.Sprintf("%s %s: %s\n", emoji, name, url))
 			hasSocials = true
 		}
 	}
 	socialsSection := ""
 	if hasSocials {
-		// Add the header ONLY if there are links
-		socialsSection = "---\nSocials\n" + socialLinksBuilder.String() // Add header and ensure trailing newline from builder
+		socialsSection = "---\nSocials\n" + socialLinksBuilder.String()
 	}
-	socialsSection = strings.TrimRight(socialsSection, "\n") // Clean trailing newline if any
+	socialsSection = strings.TrimRight(socialsSection, "\n")
 
-	// --- Determine Icon Status ---
-	var iconStatus string
+	// --- Check if image URL is valid for sending photo ---
+	// (We still need this logic even if not displaying the icon status text)
 	usePhoto := false
 	if validationResult.ImageURL != "" {
 		if _, urlErr := url.ParseRequestURI(validationResult.ImageURL); urlErr == nil && (strings.HasPrefix(validationResult.ImageURL, "http://") || strings.HasPrefix(validationResult.ImageURL, "https://")) {
-			iconStatus = "✅ Found" // Simplified status
 			usePhoto = true
 		} else {
-			appLogger.Warn("Invalid ImageURL format received from DexScreener", tokenField, zap.String("url", validationResult.ImageURL))
-			iconStatus = "⚠️ URL Invalid"
+			appLogger.Warn("Invalid ImageURL format received, cannot send as photo", tokenField, zap.String("url", validationResult.ImageURL))
 			usePhoto = false
 		}
-	} else {
-		iconStatus = "❌ Missing"
-		usePhoto = false
 	}
 
-	// --- Assemble Final Caption ---
-	// Using the new TokenName and TokenSymbol fields
-	// Added explicit newlines (\n\n) for spacing
+	// --- Assemble Final Caption (WITHOUT Icon Status line) ---
 	caption := fmt.Sprintf(
-		"*Token Graduated & Validated!* 🚀\n\n"+
-			"Token Name: %s\n"+ // <-- ADDED Name
-			"Token Symbol: %s\n\n"+ // <-- ADDED Symbol (with extra newline after)
-			"CA: `%s`\n"+
-			"Icon: %s\n\n"+ // Add extra newline after Icon status
+		"Token Name: %s\n"+
+			"Token Symbol: %s\n\n"+
+			"CA: `%s`\n\n"+ // Added newline after CA
 			"DexScreener: %s\n\n"+
 			"--- Criteria Met ---\n"+
-			"%s", // Criteria details already have internal newlines
-		// No extra newline needed here if socialsSection is empty
-		// Add socials section conditionally with preceding newline if it exists
-		validationResult.TokenName,   // <-- Use new field
-		validationResult.TokenSymbol, // <-- Use new field
+			"%s", // criteriaDetails already has internal newlines
+		validationResult.TokenName,
+		validationResult.TokenSymbol,
 		tokenAddress,
-		iconStatus,
 		dexscreenerURL,
 		criteriaDetails,
 	)
@@ -394,14 +379,14 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	return nil // Success
 }
 
-// ... (CheckTokenProgress remains the same) ...
+// CheckTokenProgress implementation (unchanged from previous version)
 func CheckTokenProgress(appLogger *logger.Logger) {
 	// Use a reasonable check interval
 	checkInterval := 2 * time.Minute // Check every 2 minutes (adjust as needed)
 
 	appLogger.Info("Token progress tracking routine started",
 		zap.Duration("interval", checkInterval),
-		zap.String("notificationTrigger", "Every integer multiple (2x, 3x, 4x...) of initial MC based on ATH seen")) // <-- UPDATED Log Message
+		zap.String("notificationTrigger", "Every integer multiple (2x, 3x, 4x...) of initial MC based on ATH seen"))
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
@@ -447,13 +432,8 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 			// Fetch current data using your existing IsTokenValid function
 			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger) // Assuming IsTokenValid returns MC
 			if err != nil {
-				// Log differently if token simply isn't found vs. API error
-				if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No trading pairs found") { // Added check for no pairs
+				if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No trading pairs found") {
 					appLogger.Info("Token not found or no pairs during progress check (possibly rugged or delisted)", tokenField, zap.Error(err))
-					// Optional: Remove token from tracking here if desired
-					// trackedProgressCache.Lock()
-					// delete(trackedProgressCache.Data, tokenAddress)
-					// trackedProgressCache.Unlock()
 				} else {
 					appLogger.Warn("Error fetching current data during progress check", tokenField, zap.Error(err))
 				}
@@ -465,64 +445,55 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 				currentMarketCap := currentValidationResult.MarketCap
 				mcCurrentField := zap.Float64("currentMC", currentMarketCap)
 
-				// *** Update Highest Market Cap Seen (if applicable) ***
 				newATH := false
 				if currentMarketCap > highestMCSeen {
 					appLogger.Debug("New highest market cap recorded", tokenField, mcCurrentField, zap.Float64("previousHighest", highestMCSeen))
-					highestMCSeen = currentMarketCap // Update local variable for calculations below
+					highestMCSeen = currentMarketCap
 					newATH = true
-					// Mark this info for update later, don't lock here
-					updatedInfo := trackedInfo                       // Copy existing info
-					updatedInfo.HighestMarketCapSeen = highestMCSeen // Update the field
-					updatesToCache[tokenAddress] = updatedInfo       // Store the whole updated struct
+					updatedInfo := trackedInfo
+					updatedInfo.HighestMarketCapSeen = highestMCSeen
+					updatesToCache[tokenAddress] = updatedInfo
 				}
 
-				// *** Calculate Multiplier and Level based on the potentially updated ATH ***
 				athMultiplier := 0.0
 				if baselineMarketCap > 0 {
-					// Use the highest market cap seen for checking notification levels
 					athMultiplier = highestMCSeen / baselineMarketCap
 				}
-
 				athNotifyLevel := int(math.Floor(athMultiplier))
 
 				multiplierField := zap.Float64("athMultiplier", athMultiplier)
 				notifyLevelField := zap.Int("athNotifyLevel", athNotifyLevel)
 				appLogger.Debug("Progress check calculation", tokenField, mcBaselineField, mcCurrentField, zap.Float64("highestMCRecorded", highestMCSeen), multiplierField, notifyLevelField, lastLevelField)
 
-				// *** Check if the ATH has reached a NEW notification level ***
 				if athNotifyLevel > lastNotifiedLevel && athNotifyLevel >= 2 {
 					appLogger.Info("Token hit new notification level based on ATH!", tokenField, mcBaselineField, zap.Float64("highestMC", highestMCSeen), notifyLevelField, lastLevelField)
 
 					dexScreenerLinkRaw := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
-					// Format message using ATH level and the highest recorded MC
-					// Include Token Name/Symbol if available from currentValidationResult
 					tokenNameStr := currentValidationResult.TokenName
 					if tokenNameStr == "" {
-						tokenNameStr = tokenAddress // Fallback to address if name is empty
+						tokenNameStr = tokenAddress // Fallback to address
 					}
 
 					progressMessage := fmt.Sprintf(
-						"🚀 Token Progress: *%s*\n\n"+ // Use Name/Symbol if available
+						"🚀 Token Progress: *%s*\n\n"+
 							"Hit: *%dx*\n\n"+
 							"Initial MC: `$%.0f`\n"+
 							"ATH MC: `$%.0f`\n\n"+
 							"DexScreener: %s",
-						escapeMarkdownV2(tokenNameStr), // Escape name for MarkdownV2
+						escapeMarkdownV2(tokenNameStr),
 						athNotifyLevel,
 						baselineMarketCap,
 						highestMCSeen,
-						dexScreenerLinkRaw, // Link doesn't usually need escaping
+						dexScreenerLinkRaw,
 					)
 
-					notifications.SendTrackingUpdateMessage(progressMessage) // Assumes this function handles MarkdownV2
+					notifications.SendTrackingUpdateMessage(progressMessage)
 					appLogger.Info("Sent ATH tracking update notification", tokenField, notifyLevelField)
 
-					// Mark this info for update later, ensuring LastNotifiedLevel is updated
-					infoToUpdate := trackedInfo // Start with original info
+					infoToUpdate := trackedInfo
 					if existingUpdate, ok := updatesToCache[tokenAddress]; ok {
-						infoToUpdate = existingUpdate // Use already updated info if ATH was also just hit
+						infoToUpdate = existingUpdate
 					}
 					infoToUpdate.LastNotifiedMultiplierLevel = athNotifyLevel
 					updatesToCache[tokenAddress] = infoToUpdate
@@ -573,3 +544,6 @@ func escapeMarkdownV2(text string) string {
 	r := strings.NewReplacer(replacerArgs...)
 	return r.Replace(text)
 }
+
+// Assume CheckExistingHeliusWebhook function exists elsewhere
+// func CheckExistingHeliusWebhook(webhookURL string, appLogger *logger.Logger) (bool, error) { ... }

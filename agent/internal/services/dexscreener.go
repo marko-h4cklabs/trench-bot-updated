@@ -22,26 +22,19 @@ var ErrRateLimited = errors.New("dexscreener rate limit exceeded")
 
 var dexScreenerLimiter = rate.NewLimiter(rate.Limit(4.66), 5)
 
-// Using the version WITH maximum limits as requested previously
 const (
 	dexScreenerAPI        = "https://api.dexscreener.com/tokens/v1/solana"
 	globalCooldownSeconds = 100
 
-	// --- Minimum Requirements ---
+	// --- Original Requirements (No Max Liq/Vol/Tx) ---
 	minLiquidity = 30000.0
 	minMarketCap = 50000.0
+	maxMarketCap = 300000.0 // The only original upper bound
 	min5mVolume  = 1000.0
 	min1hVolume  = 10000.0
 	min5mTx      = 100
 	min1hTx      = 500
-
-	// --- Maximum Requirements ---
-	maxLiquidity = 55000.0
-	maxMarketCap = 300000.0
-	max5mVolume  = 50000.0
-	max1hVolume  = 200000.0
-	max5mTx      = 400
-	max1hTx      = 1200
+	// Maximum values for Liq, Vol, Tx are NOT defined here in this version
 )
 
 var (
@@ -103,12 +96,12 @@ type TxData struct {
 	Sells int `json:"sells"`
 }
 
-// Added TokenName and TokenSymbol fields
+// Includes TokenName and TokenSymbol fields from previous request
 type ValidationResult struct {
 	IsValid                bool
 	PairAddress            string
-	TokenName              string // <-- ADDED
-	TokenSymbol            string // <-- ADDED
+	TokenName              string // Added previously
+	TokenSymbol            string // Added previously
 	LiquidityUSD           float64
 	MarketCap              float64
 	Volume5m               float64
@@ -192,9 +185,8 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				PairCreatedAtTimestamp: pair.PairCreatedAt,
 				FailReasons:            []string{},
 				OtherSocials:           make(map[string]string),
-				// Populate Name and Symbol from the BaseToken
-				TokenName:   pair.BaseToken.Name,   // <-- POPULATED
-				TokenSymbol: pair.BaseToken.Symbol, // <-- POPULATED
+				TokenName:              pair.BaseToken.Name,   // Populated previously
+				TokenSymbol:            pair.BaseToken.Symbol, // Populated previously
 			}
 
 			// ... (rest of the data population remains the same) ...
@@ -257,10 +249,9 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				}
 			}
 
-			// Added Name/Symbol to debug log
 			appLogger.Debug("DexScreener data fetched", tokenField, pairField,
-				zap.String("tokenName", result.TokenName),     // <-- ADDED
-				zap.String("tokenSymbol", result.TokenSymbol), // <-- ADDED
+				zap.String("tokenName", result.TokenName),
+				zap.String("tokenSymbol", result.TokenSymbol),
 				zap.Float64("liqUSD", result.LiquidityUSD),
 				zap.Float64("mc", result.MarketCap),
 				zap.Float64("vol5m", result.Volume5m),
@@ -277,7 +268,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			meetsCriteria := true
 			failReasons := []string{}
 
-			// --- Minimum Checks ---
+			// --- Original Minimum Checks ---
 			if result.LiquidityUSD < minLiquidity {
 				meetsCriteria = false
 				failReasons = append(failReasons, fmt.Sprintf("Liquidity %.0f < %.0f", result.LiquidityUSD, minLiquidity))
@@ -303,40 +294,20 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				failReasons = append(failReasons, fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx))
 			}
 
-			// --- Maximum Checks ---
-			if result.MarketCap > maxMarketCap {
+			// --- Original Maximum Check ---
+			if result.MarketCap > maxMarketCap { // Only the original market cap max check
 				meetsCriteria = false
 				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f > %.0f", result.MarketCap, maxMarketCap))
 			}
-			if result.LiquidityUSD > maxLiquidity {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Liquidity %.0f > %.0f", result.LiquidityUSD, maxLiquidity))
-			}
-			if result.Volume5m > max5mVolume {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Vol(5m) %.0f > %.0f", result.Volume5m, max5mVolume))
-			}
-			if result.Volume1h > max1hVolume {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Vol(1h) %.0f > %.0f", result.Volume1h, max1hVolume))
-			}
-			if result.Txns5m > max5mTx {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Tx(5m) %d > %d", result.Txns5m, max5mTx))
-			}
-			if result.Txns1h > max1hTx {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Tx(1h) %d > %d", result.Txns1h, max1hTx))
-			}
+			// --- No other maximum checks in this version ---
 
 			result.IsValid = meetsCriteria
 			result.FailReasons = failReasons
 
-			// ... (rest of the function remains the same) ...
 			if meetsCriteria {
-				appLogger.Debug("Token meets criteria (including max limits)", tokenField)
+				appLogger.Debug("Token meets original criteria", tokenField)
 			} else {
-				appLogger.Debug("Token did not meet criteria (min/max checks)", tokenField, zap.Strings("reasons", failReasons))
+				appLogger.Debug("Token did not meet original criteria", tokenField, zap.Strings("reasons", failReasons))
 			}
 
 			return result, nil
@@ -367,6 +338,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 
 		} else if statusCode == http.StatusNotFound {
 			appLogger.Info("Token not found on DexScreener", tokenField, statusField)
+			// Keep TokenName/Symbol fields even on failure for consistency? Let's keep it simpler and only populate on success.
 			return &ValidationResult{IsValid: false, FailReasons: []string{"Token not found on DexScreener"}}, nil
 
 		} else {
@@ -400,7 +372,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				zap.Int("cooldownSeconds", globalCooldownSeconds),
 				zap.Error(lastErr))
 		} else {
-			appLogger.Info("Persistent DexScreener rate limit hit, but global cooldown already active...",
+			appLogger.Info("Persistent DexScreener rate limit hit, but global cooldown already active.",
 				tokenField,
 				zap.Time("coolDownUntil", currentCoolDownEnd))
 		}
