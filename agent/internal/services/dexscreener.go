@@ -126,7 +126,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 
 	if !currentCoolDownUntil.IsZero() && time.Now().Before(currentCoolDownUntil) {
 		waitDuration := time.Until(currentCoolDownUntil)
-		appLogger.Info("DexScreener global cooldown active, waiting.",
+		appLogger.Info("DexScreener global cooldown active, waiting...",
 			zap.Duration("waitDuration", waitDuration.Round(time.Second)),
 			tokenField)
 		time.Sleep(waitDuration)
