@@ -1,5 +1,3 @@
-// agent/internal/services/graduate.go
-
 package services
 
 import (
@@ -21,15 +19,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type WebhookRequest struct {
-	WebhookURL       string   `json:"webhookURL"`
-	TransactionTypes []string `json:"transactionTypes"`
-	AccountAddresses []string `json:"accountAddresses"`
-	WebhookType      string   `json:"webhookType"`
-	TxnStatus        string   `json:"txnStatus,omitempty"` // Assuming based on previous context
-	AuthHeader       string   `json:"authHeader"`          // Assuming based on previous context
-}
-
+// ... (Struct definitions: TrackedTokenInfo, WebhookRequest, tokenCache, GraduatedTokenCache remain the same) ...
 type TrackedTokenInfo struct {
 	BaselineMarketCap           float64
 	HighestMarketCapSeen        float64
@@ -37,26 +27,36 @@ type TrackedTokenInfo struct {
 	LastNotifiedMultiplierLevel int
 }
 
-// Global cache for graduation debounce
+var trackedProgressCache = struct {
+	sync.Mutex
+	Data map[string]TrackedTokenInfo
+}{Data: make(map[string]TrackedTokenInfo)}
+
+type WebhookRequest struct {
+	WebhookURL       string   `json:"webhookURL"`
+	TransactionTypes []string `json:"transactionTypes"`
+	AccountAddresses []string `json:"accountAddresses"`
+	WebhookType      string   `json:"webhookType"`
+	TxnStatus        string   `json:"txnStatus,omitempty"`
+	AuthHeader       string   `json:"authHeader"`
+}
+
 var tokenCache = struct {
 	sync.Mutex
 	Tokens map[string]time.Time
 }{Tokens: make(map[string]time.Time)}
 
-// Global cache for already graduated tokens (maybe for CheckTokenProgress?)
-var graduatedTokenCache = struct {
-	sync.Mutex
+type GraduatedTokenCache struct {
 	Data map[string]time.Time
-}{Data: make(map[string]time.Time)}
-
-// Global cache for tracking market cap progress
-var trackedProgressCache = struct {
 	sync.Mutex
-	Data map[string]TrackedTokenInfo // Uses the TrackedTokenInfo struct
-}{Data: make(map[string]TrackedTokenInfo)}
+}
 
-// --- SetupGraduationWebhook function (unchanged from your provided code) ---
+var graduatedTokenCache = &GraduatedTokenCache{Data: make(map[string]time.Time)}
+
+// ... (SetupGraduationWebhook, HandleWebhook remain the same) ...
+
 func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
+	// ... (Implementation unchanged) ...
 	appLogger.Info("Setting up Graduation Webhook...", zap.String("url", webhookURL))
 
 	apiKey := env.HeliusAPIKey
@@ -124,11 +124,10 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	appLogger.Info("Creating new Helius webhook...")
 	requestBody := WebhookRequest{
 		WebhookURL:       webhookURL,
-		TransactionTypes: []string{"TRANSFER", "SWAP"}, // Keep both as per original
+		TransactionTypes: []string{"TRANSFER", "SWAP"},
 		AccountAddresses: addressesToMonitor,
 		WebhookType:      "enhanced",
-		AuthHeader:       authHeader, // Include auth header if provided
-		// TxnStatus: "success", // Can add this if only successful needed
+		AuthHeader:       authHeader,
 	}
 
 	bodyBytes, err := json.Marshal(requestBody)
@@ -145,13 +144,11 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	// Helius auth is typically via API key in URL or potentially a Bearer token if configured differently
-	// if webhookSecret != "" { // Re-evaluate if webhookSecret is for Helius API auth or endpoint auth
-	// 	req.Header.Set("Authorization", "Bearer "+webhookSecret)
-	// 	appLogger.Info("Setting Authorization header for Helius API.")
-	// } else {
-	// 	appLogger.Info("Using API key in query parameter for Helius API authentication.")
-	// }
+	if webhookSecret != "" {
+		appLogger.Info("Sending Helius API key via query parameter.") // Or however auth works
+	} else {
+		appLogger.Warn("WEBHOOK_SECRET is missing. Ensure API key in URL is sufficient for authentication.")
+	}
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
@@ -183,8 +180,8 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	}
 }
 
-// --- HandleWebhook function (unchanged from your provided code) ---
 func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
+	// ... (Implementation unchanged) ...
 	appLogger.Debug("Received Graduation Webhook Payload", zap.Int("size", len(payload)))
 	if len(payload) == 0 {
 		appLogger.Error("Empty graduation webhook payload received!")
@@ -192,7 +189,6 @@ func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
 	}
 
 	var eventsArray []map[string]interface{}
-	// Try parsing as array first
 	if err := json.Unmarshal(payload, &eventsArray); err == nil {
 		appLogger.Debug("Graduation webhook payload is an array.", zap.Int("count", len(eventsArray)))
 		var firstErr error
@@ -209,173 +205,60 @@ func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
 	// Try parsing as a single object if array parse failed
 	var event map[string]interface{}
 	if err := json.Unmarshal(payload, &event); err != nil {
-		// If both fail, log the error
 		appLogger.Error("Failed to parse graduation webhook payload (neither array nor object)", zap.Error(err), zap.String("payload", string(payload)))
 		return fmt.Errorf("failed to parse webhook payload: %w", err)
 	}
-
 	appLogger.Debug("Graduation webhook payload is a single event object. Processing...")
 	return processGraduatedToken(event, appLogger) // Process and return potential error
 }
 
-// --- *** MODIFIED processGraduatedToken FUNCTION *** ---
 func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) error {
 	appLogger.Debug("Processing single graduation event")
 
-	// Extract token address
 	tokenAddress, ok := events.ExtractNonSolMintFromEvent(event)
 	if !ok {
 		appLogger.Debug("Could not extract relevant non-SOL token from graduation event.")
-		return nil // Not an error, just irrelevant event
+		return nil // Not an error, just not relevant
 	}
 	tokenField := zap.String("tokenAddress", tokenAddress)
 	appLogger.Debug("Extracted token address from graduation event", tokenField)
 
-	// Prepare Dexscreener URL (used in message)
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
-	// Debounce check
 	tokenCache.Lock()
 	if _, exists := tokenCache.Tokens[tokenAddress]; exists {
 		tokenCache.Unlock()
 		appLogger.Info("Token already processed recently (graduation debounce), skipping.", tokenField)
-		return nil
+		return nil // Not an error, just debounced
 	}
-	// Add to debounce cache if not found
 	tokenCache.Tokens[tokenAddress] = time.Now()
 	tokenCache.Unlock()
 	appLogger.Info("Added token to graduation processing debounce cache", tokenField)
 
-	// Validate token against DexScreener criteria
-	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger) // Uses the modified IsTokenValid
+	// IsTokenValid now returns ValidationResult including TokenName and TokenSymbol
+	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger)
 
 	if validationErr != nil {
 		appLogger.Error("Error checking DexScreener criteria for graduated token", tokenField, zap.Error(validationErr))
-		// Decide if we should remove from debounce cache on error? Maybe not, could be transient.
+		// Clean up debounce cache on persistent error? Maybe not, let retry happen.
 		return validationErr // Propagate the error
 	}
 
-	// Check if validation passed
 	if validationResult == nil || !validationResult.IsValid {
-		reason := "Unknown validation failure or nil result"
+		reason := "Unknown validation failure"
 		if validationResult != nil && len(validationResult.FailReasons) > 0 {
 			reason = strings.Join(validationResult.FailReasons, "; ")
 		} else if validationResult != nil && !validationResult.IsValid {
 			reason = "Did not meet criteria (no specific reasons returned)"
 		}
 		appLogger.Info("Graduated token failed DexScreener criteria", tokenField, zap.String("reason", reason))
-		// No notification needed, remove from debounce maybe? For now, leave it.
-		return nil // Not an application error, just failed criteria
+		return nil // Not an error, just failed validation
 	}
 
-	// --- Token PASSED Validation ---
 	appLogger.Info("Graduated token passed validation! Preparing notification...", tokenField)
 
-	// --- START: Attempt to get better image URL from Helius ---
-	// (This image fetching logic remains unchanged from your provided code)
-	finalImageURL := validationResult.ImageURL // Default to DexScreener/validation image
-	usePhoto := false
-	// iconStatus := "❌ Icon Missing" // We removed this status from the message
-
-	if finalImageURL != "" {
-		if _, urlErr := url.ParseRequestURI(finalImageURL); urlErr == nil && (strings.HasPrefix(finalImageURL, "http://") || strings.HasPrefix(finalImageURL, "https://")) {
-			// iconStatus = "⚠️ Icon from DexScreener/Cache" // Status no longer needed
-			usePhoto = true
-		} else {
-			appLogger.Warn("Invalid ImageURL format received from validation source", tokenField, zap.String("url", finalImageURL))
-			finalImageURL = "" // Invalidate it
-			// iconStatus = "❌ Icon URL Invalid" // Status no longer needed
-			usePhoto = false
-		}
-	}
-
-	appLogger.Info("Attempting to fetch richer metadata via Helius getAsset", tokenField)
-	heliusResult, heliusErr := HeliusRPCRequest("getAsset", map[string]string{"id": tokenAddress}, appLogger) // Assume HeliusRPCRequest exists
-
-	if heliusErr != nil {
-		appLogger.Warn("Failed to fetch asset details from Helius, will use validation image URL if available", tokenField, zap.Error(heliusErr))
-	} else if heliusResult != nil {
-		appLogger.Info("Successfully fetched asset details from Helius", tokenField)
-		if resultData, ok := heliusResult["result"].(map[string]interface{}); ok {
-			if contentData, ok := resultData["content"].(map[string]interface{}); ok {
-				heliusImageURL := ""
-				if linksData, ok := contentData["links"].(map[string]interface{}); ok {
-					if imgURL, ok := linksData["image"].(string); ok && imgURL != "" {
-						heliusImageURL = imgURL
-					}
-				}
-
-				heliusFilesImageURL := ""
-				if filesData, ok := contentData["files"].([]interface{}); ok {
-					for _, fileEntry := range filesData {
-						if fileMap, ok := fileEntry.(map[string]interface{}); ok {
-							if uri, ok := fileMap["uri"].(string); ok && uri != "" {
-								mime, _ := fileMap["mime"].(string)
-								if strings.HasPrefix(mime, "image/") || mime == "" {
-									heliusFilesImageURL = uri
-									appLogger.Debug("Found potential image URI in Helius content.files", tokenField, zap.String("uri", uri), zap.String("mime", mime))
-									break
-								}
-							}
-						}
-					}
-				}
-
-				// Prioritize files URI, then links image
-				if heliusFilesImageURL != "" {
-					if _, urlErr := url.ParseRequestURI(heliusFilesImageURL); urlErr == nil {
-						appLogger.Info("Using image URL from Helius content.files", tokenField, zap.String("url", heliusFilesImageURL))
-						finalImageURL = heliusFilesImageURL
-						// iconStatus = "✅ Icon Found (Helius Files)" // Status no longer needed
-						usePhoto = true
-					} else {
-						appLogger.Warn("Invalid URL format found in Helius content.files", tokenField, zap.String("url", heliusFilesImageURL))
-						// Fallback logic: if the original finalImageURL was valid, keep it.
-						if !usePhoto { // Only reset usePhoto if it wasn't already true
-							finalImageURL = validationResult.ImageURL // Reset to original potentially valid one
-						}
-					}
-				} else if heliusImageURL != "" {
-					// Use links.image if files didn't yield a valid result
-					if _, urlErr := url.ParseRequestURI(heliusImageURL); urlErr == nil {
-						appLogger.Info("Using image URL from Helius content.links.image", tokenField, zap.String("url", heliusImageURL))
-						finalImageURL = heliusImageURL
-						// iconStatus = "✅ Icon Found (Helius Links)" // Status no longer needed
-						usePhoto = true
-					} else {
-						appLogger.Warn("Invalid URL format found in Helius content.links.image", tokenField, zap.String("url", heliusImageURL))
-						// Fallback logic
-						if !usePhoto {
-							finalImageURL = validationResult.ImageURL
-						}
-					}
-				}
-				// If neither Helius source provided a valid URL, stick with the initial check result for finalImageURL and usePhoto
-			} else {
-				appLogger.Warn("Helius response missing 'content' field", tokenField)
-			}
-		} else {
-			appLogger.Warn("Helius response missing 'result' field.", tokenField)
-		}
-	}
-	// --- END: Attempt to get better image URL from Helius ---
-
-	// --- Prepare Message Sections ---
-
-	// 1. Token Name & Symbol (from ValidationResult)
-	tokenName := validationResult.TokenName
-	tokenSymbol := validationResult.TokenSymbol
-	// Provide placeholders if name/symbol are missing
-	if tokenName == "" {
-		tokenName = "N/A"
-	}
-	if tokenSymbol == "" {
-		tokenSymbol = "N/A"
-	}
-	// Format Name (Symbol) - Escaping handled by notification sender
-	nameSymbolPart := fmt.Sprintf("%s (%s)", tokenName, tokenSymbol)
-
-	// 2. Criteria Details (Keep this logic)
+	// --- Build Criteria Section ---
+	// Using \n for newlines within this block
 	criteriaDetails := fmt.Sprintf(
 		"🩸 Liquidity: $%.0f\n"+
 			"🏛️ Market Cap: $%.0f\n"+
@@ -390,86 +273,103 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		validationResult.Txns5m,
 		validationResult.Txns1h,
 	)
-	criteriaSection := "--- Criteria Met ---\n" + criteriaDetails
 
-	// 3. Social Links (Keep this logic)
+	// --- Build Socials Section ---
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
 	if validationResult.WebsiteURL != "" {
-		// Format links for MarkdownV2 automatically later - just add raw URL here
-		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", validationResult.WebsiteURL))
+		socialLinksBuilder.WriteString(fmt.Sprintf("🌐 Website: %s\n", validationResult.WebsiteURL)) // Raw URL
 		hasSocials = true
 	}
 	if validationResult.TwitterURL != "" {
-		socialLinksBuilder.WriteString(fmt.Sprintf("🐦 Twitter: %s\n", validationResult.TwitterURL))
+		socialLinksBuilder.WriteString(fmt.Sprintf("🐦 Twitter: %s\n", validationResult.TwitterURL)) // Raw URL
 		hasSocials = true
 	}
 	if validationResult.TelegramURL != "" {
-		socialLinksBuilder.WriteString(fmt.Sprintf("✈️ Telegram: %s\n", validationResult.TelegramURL))
+		socialLinksBuilder.WriteString(fmt.Sprintf("✈️ Telegram: %s\n", validationResult.TelegramURL)) // Raw URL
 		hasSocials = true
 	}
-	// Add other socials if they exist
-	if validationResult.OtherSocials != nil {
-		for name, url := range validationResult.OtherSocials {
-			if url != "" {
-				emoji := "🔗" // Default emoji
-				lowerName := strings.ToLower(name)
-				if strings.Contains(lowerName, "discord") {
-					emoji = "💻" // Use a standard emoji for Discord
-				}
-				if strings.Contains(lowerName, "medium") {
-					emoji = "📰"
-				}
-				// Add more emoji mappings as needed
-				socialLinksBuilder.WriteString(fmt.Sprintf("%s %s: %s\n", emoji, name, url))
-				hasSocials = true
+	for name, url := range validationResult.OtherSocials {
+		if url != "" {
+			emoji := "🔗"
+			lowerName := strings.ToLower(name)
+			if strings.Contains(lowerName, "discord") {
+				emoji = "👾" // Standard Discord emoji
 			}
+			if strings.Contains(lowerName, "medium") {
+				emoji = "📰"
+			}
+			// Raw name, raw URL
+			socialLinksBuilder.WriteString(fmt.Sprintf("%s %s: %s\n", emoji, name, url))
+			hasSocials = true
 		}
 	}
-
-	socialsSection := "" // Default to empty
+	socialsSection := ""
 	if hasSocials {
-		// Trim trailing newline before adding header
-		socialsContent := strings.TrimRight(socialLinksBuilder.String(), "\n")
-		socialsSection = "---\n" + socialsContent // Use simple divider
+		// Add the header ONLY if there are links
+		socialsSection = "---\nSocials\n" + socialLinksBuilder.String() // Add header and ensure trailing newline from builder
+	}
+	socialsSection = strings.TrimRight(socialsSection, "\n") // Clean trailing newline if any
+
+	// --- Determine Icon Status ---
+	var iconStatus string
+	usePhoto := false
+	if validationResult.ImageURL != "" {
+		if _, urlErr := url.ParseRequestURI(validationResult.ImageURL); urlErr == nil && (strings.HasPrefix(validationResult.ImageURL, "http://") || strings.HasPrefix(validationResult.ImageURL, "https://")) {
+			iconStatus = "✅ Found" // Simplified status
+			usePhoto = true
+		} else {
+			appLogger.Warn("Invalid ImageURL format received from DexScreener", tokenField, zap.String("url", validationResult.ImageURL))
+			iconStatus = "⚠️ URL Invalid"
+			usePhoto = false
+		}
+	} else {
+		iconStatus = "❌ Missing"
+		usePhoto = false
 	}
 
-	// --- Assemble the Final Caption ---
-	// Order: Name (Symbol)\n\nCA\n\nDexScreener\n\nCriteria\n\nSocials
-	// NOTE: Raw strings are used here. Escaping happens in notifications.go
-	rawCaption := fmt.Sprintf(
-		"%s\n\n"+ // Name (Symbol)
-			"CA: `%s`\n\n"+ // CA (keep backticks for code block)
-			"DexScreener: %s\n\n"+ // DexScreener Link
-			"%s"+ // Criteria Section (includes header and details)
-			"%s", // Socials Section (includes divider and details, or empty string)
-		nameSymbolPart,
+	// --- Assemble Final Caption ---
+	// Using the new TokenName and TokenSymbol fields
+	// Added explicit newlines (\n\n) for spacing
+	caption := fmt.Sprintf(
+		"*Token Graduated & Validated!* 🚀\n\n"+
+			"Token Name: %s\n"+ // <-- ADDED Name
+			"Token Symbol: %s\n\n"+ // <-- ADDED Symbol (with extra newline after)
+			"CA: `%s`\n"+
+			"Icon: %s\n\n"+ // Add extra newline after Icon status
+			"DexScreener: %s\n\n"+
+			"--- Criteria Met ---\n"+
+			"%s", // Criteria details already have internal newlines
+		// No extra newline needed here if socialsSection is empty
+		// Add socials section conditionally with preceding newline if it exists
+		validationResult.TokenName,   // <-- Use new field
+		validationResult.TokenSymbol, // <-- Use new field
 		tokenAddress,
+		iconStatus,
 		dexscreenerURL,
-		criteriaSection,
-		socialsSection, // This might be empty if no socials found
+		criteriaDetails,
 	)
-	rawCaption = strings.TrimSpace(rawCaption) // Remove trailing newlines if socials are empty
+
+	// Append socials only if they exist, ensuring a blank line before them
+	if socialsSection != "" {
+		caption += "\n\n" + socialsSection
+	}
 
 	// --- Send Notification ---
-	if usePhoto && finalImageURL != "" {
-		// Send with Photo using the potentially improved Helius URL
-		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaption)
-		appLogger.Info("Telegram 'Bot Call' photo notification initiated", tokenField, zap.String("usedImageUrl", finalImageURL))
+	if usePhoto {
+		notifications.SendBotCallPhotoMessage(validationResult.ImageURL, caption)
+		appLogger.Info("Telegram 'Bot Call' photo notification initiated", tokenField, zap.String("name", validationResult.TokenName))
 	} else {
-		// Send Text Only
-		notifications.SendBotCallMessage(rawCaption)
-		appLogger.Info("Telegram 'Bot Call' text notification initiated (no valid photo found)", tokenField)
+		notifications.SendBotCallMessage(caption)
+		appLogger.Info("Telegram 'Bot Call' text notification initiated", tokenField, zap.String("name", validationResult.TokenName))
 	}
 
-	// --- Post-Notification Caching & Tracking ---
-	// Add to graduated cache
+	// --- Update Caches and Tracking ---
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
 	appLogger.Info("Added token to graduatedTokenCache", tokenField)
 
-	// Add to progress tracking cache if MC > 0
 	if validationResult.MarketCap > 0 {
 		baselineMC := validationResult.MarketCap
 		mcField := zap.Float64("baselineMC", baselineMC)
@@ -479,14 +379,14 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 				BaselineMarketCap:           baselineMC,
 				HighestMarketCapSeen:        baselineMC,
 				AddedAt:                     time.Now(),
-				LastNotifiedMultiplierLevel: 0, // Start at level 0
+				LastNotifiedMultiplierLevel: 0,
 			}
+			trackedProgressCache.Unlock()
 			appLogger.Info("Added token to progress tracking cache", tokenField, mcField)
 		} else {
-			// Optionally update baseline if seen again? For now, just log.
+			trackedProgressCache.Unlock()
 			appLogger.Info("Token already exists in progress tracking cache, skipping add.", tokenField, mcField)
 		}
-		trackedProgressCache.Unlock()
 	} else {
 		appLogger.Info("Token not added to progress tracking (Market Cap is zero)", tokenField)
 	}
@@ -494,13 +394,14 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	return nil // Success
 }
 
-// --- CheckTokenProgress function (unchanged from your provided code) ---
+// ... (CheckTokenProgress remains the same) ...
 func CheckTokenProgress(appLogger *logger.Logger) {
-	checkInterval := 2 * time.Minute
+	// Use a reasonable check interval
+	checkInterval := 2 * time.Minute // Check every 2 minutes (adjust as needed)
 
 	appLogger.Info("Token progress tracking routine started",
 		zap.Duration("interval", checkInterval),
-		zap.String("notificationTrigger", "Every integer multiple (2x, 3x, 4x...) of initial MC based on ATH seen"))
+		zap.String("notificationTrigger", "Every integer multiple (2x, 3x, 4x...) of initial MC based on ATH seen")) // <-- UPDATED Log Message
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
@@ -508,13 +409,13 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 	for range ticker.C {
 		appLogger.Debug("Running token progress check cycle...")
 
-		trackedProgressCache.Lock()
+		// --- Snapshot and Locking Strategy ---
+		trackedProgressCache.Lock() // Use Lock since we might need to update later
 		tokensToCheck := make(map[string]TrackedTokenInfo)
-		// Create a copy to avoid holding lock during API calls
 		for addr, info := range trackedProgressCache.Data {
 			tokensToCheck[addr] = info
 		}
-		trackedProgressCache.Unlock()
+		trackedProgressCache.Unlock() // Release lock after copying
 
 		count := len(tokensToCheck)
 		if count == 0 {
@@ -524,139 +425,134 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 
 		appLogger.Info("Checking progress for tracked tokens", zap.Int("count", count))
 
-		updatesToCache := make(map[string]TrackedTokenInfo) // Store updates
+		// --- Store updates separately to apply under a single lock later ---
+		updatesToCache := make(map[string]TrackedTokenInfo) // Store full updated struct
 
 		for tokenAddress, trackedInfo := range tokensToCheck {
 			tokenField := zap.String("tokenAddress", tokenAddress)
 			baselineMarketCap := trackedInfo.BaselineMarketCap
-			highestMCSeen := trackedInfo.HighestMarketCapSeen
+			highestMCSeen := trackedInfo.HighestMarketCapSeen // Get stored ATH
 			lastNotifiedLevel := trackedInfo.LastNotifiedMultiplierLevel
 			mcBaselineField := zap.Float64("baselineMC", baselineMarketCap)
 			mcHighestField := zap.Float64("highestMCSoFar", highestMCSeen)
 			lastLevelField := zap.Int("lastNotifiedLevel", lastNotifiedLevel)
 
 			if baselineMarketCap <= 0 {
-				appLogger.Warn("Token found with invalid baseline MC in tracking cache, skipping.", tokenField, mcBaselineField)
-				// Consider removing invalid entry here?
+				appLogger.Warn("Token found with invalid baseline MC, skipping.", tokenField, mcBaselineField)
 				continue
 			}
 
 			appLogger.Debug("Checking progress for specific token", tokenField, mcBaselineField, mcHighestField, lastLevelField)
 
-			// Get current data using the same validation function
-			// Note: This re-checks criteria, which might not be necessary, but reuses the MC fetch logic.
-			// Consider a lighter function just for MC if performance is critical.
-			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger)
+			// Fetch current data using your existing IsTokenValid function
+			currentValidationResult, err := IsTokenValid(tokenAddress, appLogger) // Assuming IsTokenValid returns MC
 			if err != nil {
-				// Handle errors gracefully (e.g., token not found anymore)
-				if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
-					appLogger.Info("Token not found during progress check (possibly rugged or delisted)", tokenField, zap.Error(err))
-					// Optional: Remove token from trackedProgressCache here
-					// delete(trackedProgressCache.Data, tokenAddress) // Requires write lock
+				// Log differently if token simply isn't found vs. API error
+				if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No trading pairs found") { // Added check for no pairs
+					appLogger.Info("Token not found or no pairs during progress check (possibly rugged or delisted)", tokenField, zap.Error(err))
+					// Optional: Remove token from tracking here if desired
+					// trackedProgressCache.Lock()
+					// delete(trackedProgressCache.Data, tokenAddress)
+					// trackedProgressCache.Unlock()
 				} else {
 					appLogger.Warn("Error fetching current data during progress check", tokenField, zap.Error(err))
 				}
 				continue // Skip this token for this cycle
 			}
 
-			// Process if result is valid and has market cap
+			// Check if we got valid data and positive MC
 			if currentValidationResult != nil && currentValidationResult.MarketCap > 0 {
 				currentMarketCap := currentValidationResult.MarketCap
 				mcCurrentField := zap.Float64("currentMC", currentMarketCap)
 
+				// *** Update Highest Market Cap Seen (if applicable) ***
 				newATH := false
-				// Check for new All-Time High (ATH) based on *tracked* highest
 				if currentMarketCap > highestMCSeen {
-					appLogger.Debug("New highest market cap recorded for tracking", tokenField, mcCurrentField, zap.Float64("previousHighest", highestMCSeen))
-					highestMCSeen = currentMarketCap // Update local copy
+					appLogger.Debug("New highest market cap recorded", tokenField, mcCurrentField, zap.Float64("previousHighest", highestMCSeen))
+					highestMCSeen = currentMarketCap // Update local variable for calculations below
 					newATH = true
-
-					// Prepare to update the cache
-					updatedInfo := trackedInfo                       // Start with current info
-					updatedInfo.HighestMarketCapSeen = highestMCSeen // Update the highest MC field
-					updatesToCache[tokenAddress] = updatedInfo       // Store the update needed
+					// Mark this info for update later, don't lock here
+					updatedInfo := trackedInfo                       // Copy existing info
+					updatedInfo.HighestMarketCapSeen = highestMCSeen // Update the field
+					updatesToCache[tokenAddress] = updatedInfo       // Store the whole updated struct
 				}
 
-				// Calculate multiplier based on the *tracked* ATH
+				// *** Calculate Multiplier and Level based on the potentially updated ATH ***
 				athMultiplier := 0.0
 				if baselineMarketCap > 0 {
+					// Use the highest market cap seen for checking notification levels
 					athMultiplier = highestMCSeen / baselineMarketCap
 				}
 
-				// Determine the current notification level based on ATH
-				athNotifyLevel := int(math.Floor(athMultiplier)) // Integer floor (e.g., 2.9x -> level 2)
+				athNotifyLevel := int(math.Floor(athMultiplier))
 
 				multiplierField := zap.Float64("athMultiplier", athMultiplier)
 				notifyLevelField := zap.Int("athNotifyLevel", athNotifyLevel)
 				appLogger.Debug("Progress check calculation", tokenField, mcBaselineField, mcCurrentField, zap.Float64("highestMCRecorded", highestMCSeen), multiplierField, notifyLevelField, lastLevelField)
 
-				// Check if the new level is higher than the last notified level and >= 2x
+				// *** Check if the ATH has reached a NEW notification level ***
 				if athNotifyLevel > lastNotifiedLevel && athNotifyLevel >= 2 {
 					appLogger.Info("Token hit new notification level based on ATH!", tokenField, mcBaselineField, zap.Float64("highestMC", highestMCSeen), notifyLevelField, lastLevelField)
 
-					// Prepare notification message
 					dexScreenerLinkRaw := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
+					// Format message using ATH level and the highest recorded MC
+					// Include Token Name/Symbol if available from currentValidationResult
+					tokenNameStr := currentValidationResult.TokenName
+					if tokenNameStr == "" {
+						tokenNameStr = tokenAddress // Fallback to address if name is empty
+					}
+
 					progressMessage := fmt.Sprintf(
-						"🚀 Token `%s` \n\n"+ // CA in backticks
-							"hit: *%dx* \n\n"+ // Multiplier (e.g., 2x, 3x)
-							"Initial marketcap: `$%.0f`\n"+ // Baseline MC
-							"ATH marketcap: `$%.0f`\n\n"+ // Highest MC Seen
-							"DexScreener: %s", // Raw DexScreener link
-						tokenAddress,
+						"🚀 Token Progress: *%s*\n\n"+ // Use Name/Symbol if available
+							"Hit: *%dx*\n\n"+
+							"Initial MC: `$%.0f`\n"+
+							"ATH MC: `$%.0f`\n\n"+
+							"DexScreener: %s",
+						escapeMarkdownV2(tokenNameStr), // Escape name for MarkdownV2
 						athNotifyLevel,
 						baselineMarketCap,
-						highestMCSeen, // Use the updated highest MC
-						dexScreenerLinkRaw,
+						highestMCSeen,
+						dexScreenerLinkRaw, // Link doesn't usually need escaping
 					)
 
-					// Send the tracking update notification
-					notifications.SendTrackingUpdateMessage(progressMessage) // Assumes this function exists and handles escaping
+					notifications.SendTrackingUpdateMessage(progressMessage) // Assumes this function handles MarkdownV2
 					appLogger.Info("Sent ATH tracking update notification", tokenField, notifyLevelField)
 
-					// Update the notification level in the info we plan to cache
-					infoToUpdate := trackedInfo
+					// Mark this info for update later, ensuring LastNotifiedLevel is updated
+					infoToUpdate := trackedInfo // Start with original info
 					if existingUpdate, ok := updatesToCache[tokenAddress]; ok {
-						// If already marked for update (e.g., due to new ATH), use that structure
-						infoToUpdate = existingUpdate
+						infoToUpdate = existingUpdate // Use already updated info if ATH was also just hit
 					}
-					infoToUpdate.LastNotifiedMultiplierLevel = athNotifyLevel // Set new notified level
-					updatesToCache[tokenAddress] = infoToUpdate               // Store updated info
+					infoToUpdate.LastNotifiedMultiplierLevel = athNotifyLevel
+					updatesToCache[tokenAddress] = infoToUpdate
 
 				} else if newATH {
-					// Log if new ATH but didn't cross a notification threshold
 					appLogger.Debug("New ATH recorded, but notification level not increased yet.", tokenField, notifyLevelField, lastLevelField)
 				} else {
-					// Log if no new ATH and no new level
 					appLogger.Debug("Token progress check: Notification condition not met.", tokenField, notifyLevelField, lastLevelField)
 				}
-
 			} else {
-				// Log if current validation failed or MC is zero
 				mcValue := 0.0
 				if currentValidationResult != nil {
 					mcValue = currentValidationResult.MarketCap
 				}
 				appLogger.Debug("Token progress check: Current market cap is zero or validation result missing/invalid.", tokenField, zap.Bool("hasResult", currentValidationResult != nil), zap.Float64("currentMC", mcValue))
-				// Optionally remove from tracking if persistently zero?
 			}
 
-			// Small delay between checks to avoid hammering APIs/rate limits
 			time.Sleep(200 * time.Millisecond)
 
-		} // End loop through tokensToCheck
+		} // End token loop
 
-		// Apply updates to the main cache under a lock
+		// Apply updates
 		if len(updatesToCache) > 0 {
 			trackedProgressCache.Lock()
 			for tokenAddr, updatedInfo := range updatesToCache {
-				// Check if the token still exists in the cache before updating
 				if _, ok := trackedProgressCache.Data[tokenAddr]; ok {
 					trackedProgressCache.Data[tokenAddr] = updatedInfo
 					appLogger.Info("Updated token tracking info in cache", zap.String("tokenAddress", tokenAddr), zap.Float64("newHighestMC", updatedInfo.HighestMarketCapSeen), zap.Int("newNotifiedLevel", updatedInfo.LastNotifiedMultiplierLevel))
 				} else {
-					// This might happen if the token was removed between copy and update
-					appLogger.Warn("Attempted to update info for token no longer in tracking cache", zap.String("tokenAddress", tokenAddr))
+					appLogger.Warn("Attempted to update info for token no longer in cache", zap.String("tokenAddress", tokenAddr))
 				}
 			}
 			trackedProgressCache.Unlock()
@@ -664,4 +560,16 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 
 		appLogger.Debug("Token progress check cycle finished.")
 	} // End ticker loop
+}
+
+// Helper function to escape characters for MarkdownV2
+func escapeMarkdownV2(text string) string {
+	// Characters to escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
+	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	replacerArgs := make([]string, 0, len(escapeChars)*2)
+	for _, char := range escapeChars {
+		replacerArgs = append(replacerArgs, char, "\\"+char)
+	}
+	r := strings.NewReplacer(replacerArgs...)
+	return r.Replace(text)
 }

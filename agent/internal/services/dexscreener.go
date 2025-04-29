@@ -22,18 +22,26 @@ var ErrRateLimited = errors.New("dexscreener rate limit exceeded")
 
 var dexScreenerLimiter = rate.NewLimiter(rate.Limit(4.66), 5)
 
+// Using the version WITH maximum limits as requested previously
 const (
 	dexScreenerAPI        = "https://api.dexscreener.com/tokens/v1/solana"
 	globalCooldownSeconds = 100
 
-	// --- Original Requirements ---
-	minLiquidity = 40000.0
+	// --- Minimum Requirements ---
+	minLiquidity = 30000.0
 	minMarketCap = 50000.0
-	maxMarketCap = 250000.0
 	min5mVolume  = 1000.0
 	min1hVolume  = 10000.0
 	min5mTx      = 100
 	min1hTx      = 500
+
+	// --- Maximum Requirements ---
+	maxLiquidity = 55000.0
+	maxMarketCap = 300000.0
+	max5mVolume  = 50000.0
+	max1hVolume  = 200000.0
+	max5mTx      = 400
+	max1hTx      = 1200
 )
 
 var (
@@ -95,10 +103,12 @@ type TxData struct {
 	Sells int `json:"sells"`
 }
 
-// --- MODIFIED ValidationResult struct ---
+// Added TokenName and TokenSymbol fields
 type ValidationResult struct {
 	IsValid                bool
 	PairAddress            string
+	TokenName              string // <-- ADDED
+	TokenSymbol            string // <-- ADDED
 	LiquidityUSD           float64
 	MarketCap              float64
 	Volume5m               float64
@@ -112,8 +122,6 @@ type ValidationResult struct {
 	OtherSocials           map[string]string
 	ImageURL               string
 	PairCreatedAtTimestamp int64
-	TokenName              string // <-- ADDED
-	TokenSymbol            string // <-- ADDED
 }
 
 func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, error) {
@@ -128,7 +136,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 
 	if !currentCoolDownUntil.IsZero() && time.Now().Before(currentCoolDownUntil) {
 		waitDuration := time.Until(currentCoolDownUntil)
-		appLogger.Info("DexScreener global cooldown active, waiting...",
+		appLogger.Info("DexScreener global cooldown active, waiting.",
 			zap.Duration("waitDuration", waitDuration.Round(time.Second)),
 			tokenField)
 		time.Sleep(waitDuration)
@@ -179,17 +187,17 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 
 			pair := responseData[0]
 			pairField := zap.String("pairAddress", pair.PairAddress)
-
-			// --- MODIFIED ValidationResult Initialization ---
 			result := &ValidationResult{
 				PairAddress:            pair.PairAddress,
 				PairCreatedAtTimestamp: pair.PairCreatedAt,
 				FailReasons:            []string{},
 				OtherSocials:           make(map[string]string),
-				TokenName:              pair.BaseToken.Name,   // Populate Name
-				TokenSymbol:            pair.BaseToken.Symbol, // Populate Symbol
+				// Populate Name and Symbol from the BaseToken
+				TokenName:   pair.BaseToken.Name,   // <-- POPULATED
+				TokenSymbol: pair.BaseToken.Symbol, // <-- POPULATED
 			}
 
+			// ... (rest of the data population remains the same) ...
 			if pair.Liquidity != nil {
 				result.LiquidityUSD = pair.Liquidity.Usd
 			} else {
@@ -198,7 +206,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			}
 
 			result.MarketCap = pair.FDV
-			if pair.MarketCap > 0 { // Use marketCap if available, otherwise FDV (already assigned)
+			if pair.MarketCap > 0 {
 				result.MarketCap = pair.MarketCap
 			}
 
@@ -244,24 +252,21 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 					case "telegram":
 						result.TelegramURL = social.URL
 					default:
-						// Ensure OtherSocials is initialized before adding
-						if result.OtherSocials == nil {
-							result.OtherSocials = make(map[string]string)
-						}
 						result.OtherSocials[strings.Title(social.Type)] = social.URL
 					}
 				}
 			}
 
+			// Added Name/Symbol to debug log
 			appLogger.Debug("DexScreener data fetched", tokenField, pairField,
+				zap.String("tokenName", result.TokenName),     // <-- ADDED
+				zap.String("tokenSymbol", result.TokenSymbol), // <-- ADDED
 				zap.Float64("liqUSD", result.LiquidityUSD),
 				zap.Float64("mc", result.MarketCap),
 				zap.Float64("vol5m", result.Volume5m),
 				zap.Float64("vol1h", result.Volume1h),
 				zap.Int("tx5m", result.Txns5m),
 				zap.Int("tx1h", result.Txns1h),
-				zap.String("tokenName", result.TokenName),     // Log Name
-				zap.String("tokenSymbol", result.TokenSymbol), // Log Symbol
 				zap.Bool("hasWebsite", result.WebsiteURL != ""),
 				zap.Bool("hasTwitter", result.TwitterURL != ""),
 				zap.Bool("hasTelegram", result.TelegramURL != ""),
@@ -272,7 +277,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			meetsCriteria := true
 			failReasons := []string{}
 
-			// --- Original Minimum Checks ---
+			// --- Minimum Checks ---
 			if result.LiquidityUSD < minLiquidity {
 				meetsCriteria = false
 				failReasons = append(failReasons, fmt.Sprintf("Liquidity %.0f < %.0f", result.LiquidityUSD, minLiquidity))
@@ -298,28 +303,48 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				failReasons = append(failReasons, fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx))
 			}
 
-			// --- Original Maximum Check ---
-			if result.MarketCap > maxMarketCap { // Only the original market cap max check
+			// --- Maximum Checks ---
+			if result.MarketCap > maxMarketCap {
 				meetsCriteria = false
 				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f > %.0f", result.MarketCap, maxMarketCap))
 			}
-			// --- No other maximum checks in this version ---
+			if result.LiquidityUSD > maxLiquidity {
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Liquidity %.0f > %.0f", result.LiquidityUSD, maxLiquidity))
+			}
+			if result.Volume5m > max5mVolume {
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Vol(5m) %.0f > %.0f", result.Volume5m, max5mVolume))
+			}
+			if result.Volume1h > max1hVolume {
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Vol(1h) %.0f > %.0f", result.Volume1h, max1hVolume))
+			}
+			if result.Txns5m > max5mTx {
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Tx(5m) %d > %d", result.Txns5m, max5mTx))
+			}
+			if result.Txns1h > max1hTx {
+				meetsCriteria = false
+				failReasons = append(failReasons, fmt.Sprintf("Tx(1h) %d > %d", result.Txns1h, max1hTx))
+			}
 
 			result.IsValid = meetsCriteria
 			result.FailReasons = failReasons
 
+			// ... (rest of the function remains the same) ...
 			if meetsCriteria {
-				appLogger.Debug("Token meets original criteria", tokenField)
+				appLogger.Debug("Token meets criteria (including max limits)", tokenField)
 			} else {
-				appLogger.Debug("Token did not meet original criteria", tokenField, zap.Strings("reasons", failReasons))
+				appLogger.Debug("Token did not meet criteria (min/max checks)", tokenField, zap.Strings("reasons", failReasons))
 			}
 
-			return result, nil // Return successful result
-		} // End if status OK
+			return result, nil
+		}
 
+		// ... (Error handling and retry logic remains the same) ...
 		lastErr = fmt.Errorf("API request failed with status: %d", statusCode)
 
-		// --- Handle Non-OK Status Codes (Rate Limit, Not Found, Other) ---
 		if statusCode == http.StatusTooManyRequests {
 			lastErr = ErrRateLimited
 			retryAfterHeader := resp.Header.Get("Retry-After")
@@ -327,10 +352,8 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			if secs, err := strconv.Atoi(retryAfterHeader); err == nil && secs > 0 {
 				retryAfterSeconds = secs
 			} else {
-				// Use exponential backoff if header missing/invalid
 				retryAfterSeconds = int(math.Pow(2, float64(attempt))) + 1
 			}
-			// Cap the wait time
 			maxWait := 60
 			if retryAfterSeconds > maxWait {
 				retryAfterSeconds = maxWait
@@ -340,41 +363,36 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			if attempt < maxRetries-1 {
 				time.Sleep(time.Duration(retryAfterSeconds) * time.Second)
 			}
-			continue // Go to next retry attempt
+			continue
 
 		} else if statusCode == http.StatusNotFound {
 			appLogger.Info("Token not found on DexScreener", tokenField, statusField)
-			// Return specific result for "not found"
 			return &ValidationResult{IsValid: false, FailReasons: []string{"Token not found on DexScreener"}}, nil
 
 		} else {
-			// Handle other non-200, non-429, non-404 errors
 			errorMsg := fmt.Sprintf("DexScreener API non-OK status: %d", statusCode)
 			if readErr != nil {
 				errorMsg += fmt.Sprintf(". Failed to read response body: %v", readErr)
 			}
 			appLogger.Warn(errorMsg, attemptField, tokenField, statusField, zap.ByteString("body", bodyBytes))
-			lastErr = fmt.Errorf(errorMsg) // Update last error
+			lastErr = fmt.Errorf(errorMsg)
 			if attempt < maxRetries-1 {
-				// Exponential backoff for other errors
 				time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
 			}
-			continue // Go to next retry attempt
+			continue
 		}
-	} // End retry loop
+	}
 
-	// If loop finished without success
+	// ... (Final error handling and cooldown logic remains the same) ...
 	appLogger.Error("Failed to get valid DexScreener response after retries",
 		tokenField,
 		zap.Int("attempts", maxRetries),
 		zap.Error(lastErr))
 
-	// Activate global cooldown if the last error was rate limiting
 	if errors.Is(lastErr, ErrRateLimited) {
 		cooldownMutex.Lock()
 		now := time.Now()
 		currentCoolDownEnd := coolDownUntil
-		// Activate cooldown only if not already active or expired
 		if currentCoolDownEnd.IsZero() || now.After(currentCoolDownEnd) {
 			coolDownUntil = now.Add(time.Duration(globalCooldownSeconds) * time.Second)
 			appLogger.Warn("Persistent DexScreener rate limit hit. Activating global cooldown.",
