@@ -320,11 +320,10 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		}
 	}
 
-	// --- Assemble Final Caption (WITHOUT Icon Status line) ---
 	caption := fmt.Sprintf(
-		"Token Name: %s\n"+
-			"Token Symbol: %s\n\n"+
-			"CA: `%s`\n\n"+ // Added newline after CA
+		"Name: %s\n"+
+			"Symbol: %s\n\n"+
+			"*CA:* `%s`\n\n"+
 			"DexScreener: %s\n\n"+
 			"--- Criteria Met ---\n"+
 			"%s", // criteriaDetails already has internal newlines
