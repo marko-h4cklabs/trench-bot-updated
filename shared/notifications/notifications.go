@@ -131,7 +131,6 @@ func EscapeMarkdownV2(s string) string {
 }
 
 // coreSendMessageWithRetry handles the sending logic with rate limiting and retries.
-// It now correctly handles photo fallback on specific errors.
 func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string) error {
 	localBot := GetBotInstance()
 	if localBot == nil {
@@ -139,9 +138,9 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		return errors.New("telego bot not initialized")
 	}
 
-	// Send raw text - backticks for copy/paste don't need escaping in MarkdownV2.
-	// If you add other formatting like *bold*, you might need to escape selectively or use the EscapeMarkdownV2 function.
-	escapedTextOrCaption := rawTextOrCaption
+	// === FIX: Escape the entire text/caption for MarkdownV2 ===
+	escapedTextOrCaption := EscapeMarkdownV2(rawTextOrCaption)
+	// ===========================================================
 
 	var lastErr error
 	logCtx := fmt.Sprintf("[ChatID: %d]", chatID)
@@ -177,8 +176,8 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 			params := &telego.SendPhotoParams{
 				ChatID:          telego.ChatID{ID: chatID},
 				Photo:           telego.InputFile{URL: photoURL},
-				Caption:         escapedTextOrCaption,
-				ParseMode:       telego.ModeMarkdownV2, // Use MarkdownV2 for caption
+				Caption:         escapedTextOrCaption, // Use escaped version
+				ParseMode:       telego.ModeMarkdownV2,
 				MessageThreadID: messageThreadID,
 			}
 			log.Printf("DEBUG: Attempting SendPhoto %s (Attempt %d/%d)", logCtx, attempt+1, maxRetries)
@@ -186,8 +185,8 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		} else {
 			params := &telego.SendMessageParams{
 				ChatID:          telego.ChatID{ID: chatID},
-				Text:            escapedTextOrCaption,
-				ParseMode:       telego.ModeMarkdownV2, // Use MarkdownV2 for backticks etc.
+				Text:            escapedTextOrCaption, // Use escaped version
+				ParseMode:       telego.ModeMarkdownV2,
 				MessageThreadID: messageThreadID,
 				// DisableWebPagePreview: true, // Optional
 			}
@@ -206,7 +205,6 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		lastErr = currentErr
 		shouldRetry := false
 		specificRetryAfter := 0
-		// Removed unused variable: isPhotoError := false
 
 		if currentErr != nil {
 			var apiErr *telegoapi.Error
@@ -219,45 +217,50 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 					shouldRetry = true
 					log.Printf("INFO: Rate limit hit, will retry after %d seconds %s", specificRetryAfter, logCtx)
 				} else if apiErr.ErrorCode == 400 {
-					nonRetryableSubstrings := []string{
-						"thread not found", "can't parse entities", "chat not found",
-						"wrong type of chat", "message text is empty",
-					}
-					photoErrorSubstrings := []string{
-						"wrong file identifier", "Wrong remote file ID specified", "can't download file",
-						"failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small",
-						"IMAGE_PROCESS_FAILED",
-					}
-					isNonRetryable := false
-					for _, sub := range nonRetryableSubstrings {
-						if strings.Contains(apiErr.Description, sub) {
-							isNonRetryable = true
-							break
-						}
-					}
-
-					if isNonRetryable {
-						shouldRetry = false
-						log.Printf("ERROR: Non-retryable Telegram API error 400: %s. Aborting. %s", apiErr.Description, logCtx)
+					// Check specifically for parsing errors first
+					if strings.Contains(apiErr.Description, "can't parse entities") {
+						log.Printf("ERROR: MarkdownV2 parsing error: %s. Aborting retries. Check input text and escaping. %s", apiErr.Description, logCtx)
+						shouldRetry = false // Don't retry parsing errors
 					} else {
-						isKnownPhotoError := false
-						if isPhoto { // Only check photo errors if we were sending a photo
-							for _, sub := range photoErrorSubstrings {
-								if strings.Contains(apiErr.Description, sub) {
-									isKnownPhotoError = true
-									break
-								}
+						// Handle other 400 errors
+						nonRetryableSubstrings := []string{
+							"thread not found", "chat not found",
+							"wrong type of chat", "message text is empty",
+						}
+						photoErrorSubstrings := []string{
+							"wrong file identifier", "Wrong remote file ID specified", "can't download file",
+							"failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small",
+							"IMAGE_PROCESS_FAILED",
+						}
+						isNonRetryable := false
+						for _, sub := range nonRetryableSubstrings {
+							if strings.Contains(apiErr.Description, sub) {
+								isNonRetryable = true
+								break
 							}
 						}
 
-						if isKnownPhotoError { // implies isPhoto was true
-							shouldRetry = false // Don't retry photo send if it's a known photo error
-							log.Printf("WARN: Photo-specific error 400: %s. Will attempt fallback to text after retries. %s", apiErr.Description, logCtx)
-							// Fallback logic happens *after* the loop based on lastErr
-						} else {
-							// Other 400 errors - might be temporary, markdown issue, etc. Don't retry.
+						if isNonRetryable {
 							shouldRetry = false
-							log.Printf("WARN: Uncategorized/potentially non-retryable API error 400: %s. Aborting retry. %s", apiErr.Description, logCtx)
+							log.Printf("ERROR: Non-retryable Telegram API error 400: %s. Aborting. %s", apiErr.Description, logCtx)
+						} else {
+							isKnownPhotoError := false
+							if isPhoto {
+								for _, sub := range photoErrorSubstrings {
+									if strings.Contains(apiErr.Description, sub) {
+										isKnownPhotoError = true
+										break
+									}
+								}
+							}
+
+							if isKnownPhotoError {
+								shouldRetry = false
+								log.Printf("WARN: Photo-specific error 400: %s. Will attempt fallback to text after retries. %s", apiErr.Description, logCtx)
+							} else {
+								shouldRetry = false
+								log.Printf("WARN: Uncategorized/potentially non-retryable API error 400: %s. Aborting retry. %s", apiErr.Description, logCtx)
+							}
 						}
 					}
 				} else if apiErr.ErrorCode == 403 || apiErr.ErrorCode == 401 || apiErr.ErrorCode == 404 {
@@ -301,7 +304,6 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 	// --- Final Check and Fallback ---
 	if lastErr != nil {
 		log.Printf("ERROR: Telegram message FAILED to send after %d retries. Last Error: %v. %s", maxRetries, lastErr, logCtx)
-		// Check if the original attempt was a photo AND the last error indicates a photo-specific issue
 		if isPhoto {
 			var lastApiErr *telegoapi.Error
 			photoErrorSubstrings := []string{
@@ -319,7 +321,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 				}
 				if isKnownPhotoError {
 					log.Printf("INFO: Final error indicates photo issue. Falling back to sending caption as text message. %s", logCtx)
-					// Recursive call - send as text. NO retry loop needed here as this is the fallback.
+					// Send the *original* caption in case escaping caused issues (unlikely for photo errors, but safer)
 					return coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "")
 				}
 			}
@@ -331,7 +333,6 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 
 // SendTelegramMessage sends a standard text message to the default group.
 func SendTelegramMessage(message string) {
-	// Discard error for simple fire-and-forget logging
 	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "")
 }
 
@@ -340,7 +341,7 @@ func SendBotCallMessage(message string) {
 	threadID := env.BotCallsThreadID
 	if threadID == 0 {
 		log.Println("WARN: Attempted to send to Bot Calls topic, but BOT_CALLS_THREAD_ID is not set. Sending to main group chat.")
-		// threadID remains 0 to send to main group
+		threadID = 0 // Ensure sending to main group if not set
 	}
 	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "")
 }
@@ -353,7 +354,6 @@ func SendBotCallPhotoMessage(photoURL string, caption string) {
 		_ = coreSendMessageWithRetry(defaultGroupID, 0, caption, false, "") // Fallback to text in main group
 		return
 	}
-	// Basic URL validation before attempting send
 	parsedURL, urlErr := url.ParseRequestURI(photoURL)
 	if urlErr != nil || !(parsedURL.Scheme == "http" || parsedURL.Scheme == "https") {
 		log.Printf("ERROR: Invalid photo URL format: %s - %v. Falling back to sending caption as text message.", photoURL, urlErr)
@@ -368,7 +368,7 @@ func SendTrackingUpdateMessage(message string) {
 	threadID := env.TrackingThreadID
 	if threadID == 0 {
 		log.Println("WARN: Attempted to send to Tracking topic, but TRACKING_THREAD_ID is not set. Sending to main group chat.")
-		// threadID remains 0 to send to main group
+		threadID = 0 // Ensure sending to main group if not set
 	}
 	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "")
 }
@@ -380,11 +380,11 @@ func SendVerificationSuccessMessage(userID int64, groupLink string) error {
 		return errors.New("target group link is empty")
 	}
 
-	// Escape the link text *and* the special characters in the surrounding text
-	// Note: Links themselves usually don't need escaping in MarkdownV2 `[text](url)`
-	escapedGroupLink := groupLink // URL itself doesn't need escaping
-	// Ensure ! and . are escaped for MarkdownV2
+	// The message text itself needs escaping for MarkdownV2 characters like '!' and '.'
+	// The URL within the link []() syntax generally does *not* need escaping.
+	escapedGroupLink := groupLink
 	messageText := fmt.Sprintf("✅ Verification Successful\\! You now have access\\.\n\nJoin the group here: [Click to Join](%s)", escapedGroupLink)
+	// Note: Sprintf doesn't escape, the previous line manually escapes ! and .
 
 	localBot := GetBotInstance()
 	if localBot == nil {
@@ -393,6 +393,7 @@ func SendVerificationSuccessMessage(userID int64, groupLink string) error {
 	}
 
 	// Send directly to the user (ChatID = userID, no thread ID)
+	// Pass the manually crafted messageText (which has \! and \.)
 	err := coreSendMessageWithRetry(userID, 0, messageText, false, "")
 
 	if err != nil {
