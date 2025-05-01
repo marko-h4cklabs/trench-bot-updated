@@ -1,3 +1,4 @@
+// FILE: agent/shared/notifications/notifications.go
 package notifications
 
 import (
@@ -118,6 +119,7 @@ func EscapeMarkdownV2(s string) string {
 	return builder.String()
 }
 
+// --- START OF UPDATED FUNCTION ---
 func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string, replyMarkup telego.ReplyMarkup) error {
 	localBot := GetBotInstance()
 	if localBot == nil {
@@ -171,83 +173,99 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 
 		if currentErr == nil && sentMsg != nil && sentMsg.MessageID != 0 {
 			log.Printf("INFO: Telegram message sent successfully %s (MsgID: %d)", logCtx, sentMsg.MessageID)
-			return nil
+			return nil // Success!
 		}
 
+		// Log the error for this attempt
 		if currentErr != nil {
 			log.Printf("ERROR: Send API Call FAILED %s (Attempt %d/%d). Error: %v", logCtx, attempt+1, maxRetries, currentErr)
 		} else {
 			log.Printf("WARN: Send API Call SUCCEEDED according to error status but MsgID is 0 %s (Attempt %d/%d).", logCtx, attempt+1, maxRetries)
 		}
 
-		lastErr = currentErr
+		lastErr = currentErr // Store the error from this attempt
+
+		// --- Retry / Fallback Logic ---
 		shouldRetry := false
 		specificRetryAfter := 0
 		if currentErr != nil {
 			var apiErr *telegoapi.Error
 			if errors.As(currentErr, &apiErr) {
+				// Handle Rate Limiting
 				if apiErr.ErrorCode == 429 && apiErr.Parameters != nil {
 					specificRetryAfter = apiErr.Parameters.RetryAfter
 					shouldRetry = true
-				} else if apiErr.ErrorCode == 400 {
-					if strings.Contains(apiErr.Description, "can't parse entities") {
-						shouldRetry = false
-					} else {
-						nonRetryableSubstrings := []string{"thread not found", "chat not found", "wrong type of chat", "message text is empty"}
-						photoErrorSubstrings := []string{"wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small", "IMAGE_PROCESS_FAILED"}
-						isNonRetryable := false
-						for _, sub := range nonRetryableSubstrings {
+				} else if apiErr.ErrorCode == 400 { // Handle Bad Requests
+					// Non-retryable general 400 errors
+					nonRetryableSubstrings := []string{"thread not found", "chat not found", "wrong type of chat", "message text is empty", "can't parse entities", "Text buttons are unallowed"}
+					isNonRetryable := false
+					for _, sub := range nonRetryableSubstrings {
+						if strings.Contains(apiErr.Description, sub) {
+							isNonRetryable = true
+							break
+						}
+					}
+
+					// Known Photo-specific 400 errors that warrant fallback
+					photoErrorSubstrings := []string{"wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small", "IMAGE_PROCESS_FAILED"}
+					isKnownPhotoError := false
+					if isPhoto { // Only check photo errors if we were trying to send a photo
+						for _, sub := range photoErrorSubstrings {
 							if strings.Contains(apiErr.Description, sub) {
-								isNonRetryable = true
+								isKnownPhotoError = true
 								break
 							}
 						}
-						if isNonRetryable {
-							shouldRetry = false
+					}
+
+					if isNonRetryable {
+						shouldRetry = false // Don't retry these general errors
+					} else if isKnownPhotoError { // <<< START OF IMMEDIATE FALLBACK LOGIC
+						// --- IMMEDIATE FALLBACK ---
+						log.Printf("INFO: Known photo error detected (%s). Attempting fallback to text. %s", apiErr.Description, logCtx)
+						// Call recursively, forcing text mode. Pass original markup!
+						fallbackErr := coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "", replyMarkup)
+						if fallbackErr != nil {
+							log.Printf("ERROR: Fallback to text ALSO FAILED. Original Error: %v. Fallback Error: %v. %s", currentErr, fallbackErr, logCtx)
+							// Keep the original error as the primary cause
+							lastErr = currentErr
+							shouldRetry = false // Ensure loop terminates
 						} else {
-							isKnownPhotoError := false
-							if isPhoto {
-								for _, sub := range photoErrorSubstrings {
-									if strings.Contains(apiErr.Description, sub) {
-										isKnownPhotoError = true
-										break
-									}
-								}
-							}
-							if isKnownPhotoError {
-								shouldRetry = false
-							} else {
-								// If it's a 400 but not specifically parse entities or a known photo/non-retryable error,
-								// include the "Text buttons are unallowed" case here explicitly to NOT retry it
-								if strings.Contains(apiErr.Description, "Text buttons are unallowed") {
-									shouldRetry = false
-								} else {
-									// Default to not retrying other 400s unless known to be transient
-									shouldRetry = false
-								}
-							}
+							log.Printf("INFO: Fallback to text succeeded. %s", logCtx)
+							return nil // Fallback worked, so return success immediately
 						}
+						// --- END IMMEDIATE FALLBACK ---
+					} else { // <<< END OF IMMEDIATE FALLBACK LOGIC
+						// Default for other unknown 400 errors
+						shouldRetry = false
 					}
 				} else if apiErr.ErrorCode == 403 || apiErr.ErrorCode == 401 || apiErr.ErrorCode == 404 {
+					// Definitively non-retryable errors
 					shouldRetry = false
 				} else {
+					// Assume other errors (like 5xx server errors) might be transient
 					shouldRetry = true
 				}
 			} else {
+				// Network errors or other non-API errors, usually worth retrying
 				shouldRetry = true
 			}
 		} else {
+			// If currentErr was nil but we didn't return success (e.g., MsgID was 0), retry
 			shouldRetry = true
 		}
 
+		// Check if we should stop retrying
 		if !shouldRetry || attempt >= maxRetries-1 {
 			if shouldRetry && attempt >= maxRetries-1 {
 				log.Printf("ERROR: Max retries (%d) reached. Aborting. %s", maxRetries, logCtx)
 			} else if !shouldRetry {
-				log.Printf("ERROR: Non-retryable error encountered or error indicates no retry needed. Aborting. %s", logCtx)
+				log.Printf("ERROR: Non-retryable error encountered or fallback attempted. Aborting retry loop. %s", logCtx)
 			}
-			break
+			break // Exit the retry loop
 		}
+
+		// Calculate wait duration
 		waitDuration := baseRetryWait * time.Duration(math.Pow(2, float64(attempt)))
 		if specificRetryAfter > 0 {
 			waitDuration = time.Duration(specificRetryAfter) * time.Second
@@ -257,31 +275,18 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		}
 		log.Printf("INFO: Retrying failed send in %v... %s", waitDuration, logCtx)
 		time.Sleep(waitDuration)
+	} // --- End retry loop ---
+
+	// If we exited the loop and still have an error (meaning fallback didn't happen or wasn't triggered)
+	if lastErr != nil {
+		log.Printf("ERROR: Telegram message FAILED after all attempts/fallbacks. Final Error: %v. %s", lastErr, logCtx)
+		// Note: The explicit post-loop fallback logic is removed because it's now handled *within* the loop.
 	}
 
-	if lastErr != nil {
-		log.Printf("ERROR: Telegram message FAILED. Final Error: %v. %s", lastErr, logCtx)
-		if isPhoto {
-			var lastApiErr *telegoapi.Error
-			photoErrorSubstrings := []string{"wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small", "IMAGE_PROCESS_FAILED"}
-			if errors.As(lastErr, &lastApiErr) && lastApiErr.ErrorCode == 400 {
-				isKnownPhotoError := false
-				for _, sub := range photoErrorSubstrings {
-					if strings.Contains(lastApiErr.Description, sub) {
-						isKnownPhotoError = true
-						break
-					}
-				}
-				if isKnownPhotoError {
-					log.Printf("INFO: Final error indicates photo issue. Falling back to text. %s", logCtx)
-					// Pass nil for markup on fallback to text
-					return coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "", nil)
-				}
-			}
-		}
-	}
-	return lastErr
+	return lastErr // Return the last encountered error
 }
+
+// --- END OF UPDATED FUNCTION ---
 
 func SendTelegramMessage(message string) {
 	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "", nil)
@@ -318,13 +323,14 @@ func SendBotCallPhotoMessage(photoURL string, caption string, buttons ...map[str
 	threadID := env.BotCallsThreadID
 	if threadID == 0 {
 		log.Println("WARN: Bot Calls thread ID not set, sending caption as text to main group.")
-		// Pass nil for markup on fallback
-		_ = coreSendMessageWithRetry(defaultGroupID, 0, caption, false, "", nil)
+		// Call SendBotCallMessage for fallback, which handles buttons correctly
+		SendBotCallMessage(caption, buttons...)
 		return
 	}
 	parsedURL, urlErr := url.ParseRequestURI(photoURL)
 	if urlErr != nil || !(parsedURL.Scheme == "http" || parsedURL.Scheme == "https") {
 		log.Printf("ERROR: Invalid photo URL format: %s - %v. Falling back to sending caption as text message.", photoURL, urlErr)
+		// Call SendBotCallMessage for fallback, which handles buttons correctly
 		SendBotCallMessage(caption, buttons...)
 		return
 	}
