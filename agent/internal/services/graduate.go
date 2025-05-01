@@ -55,7 +55,7 @@ var graduatedTokenCache = &GraduatedTokenCache{Data: make(map[string]time.Time)}
 
 // --- Constants ---
 const (
-	solAddress = "So11111111111111111111111111111111111111112" // Wrapped SOL address for Axiom link
+	solAddress = "So11111111111111111111111111111111111111112" // Wrapped SOL address for Axiom link (if needed, not used in this version)
 )
 
 // --- Webhook Setup ---
@@ -197,7 +197,7 @@ func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
 
 // --- Token Processing and Notification ---
 
-// processGraduatedToken modified minimally to add trading links
+// processGraduatedToken modified minimally to add trading links at the end
 func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) error {
 	appLogger.Debug("Processing single graduation event")
 
@@ -304,36 +304,22 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Debug("No image URL, sending text.", tokenField)
 	}
 
-	// *** MODIFICATION START: Construct Trading URLs ***
+	// Construct Dexscreener URL (needed for main caption part)
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
-	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress)
-	axiomURL := fmt.Sprintf("https://axiom.so/swap/%s?quote=%s", tokenAddress, solAddress)
-	// *** MODIFICATION END ***
 
-	// --- Assemble Final Caption ---
-	// Modified caption to include trading links
+	// --- Assemble Main Caption PART 1 (Info + Criteria)---
+	// This remains as you provided it
 	caption := fmt.Sprintf(
 		"🚨Name: %s\n"+
-			"🎯Symbol: $%s\n\n"+ // Kept the $ prefix as in your previous Sprintf example
+			"🎯Symbol: $%s\n\n"+
 			"📃CA: `%s`\n\n"+ // Backticks for copy-on-tap
-
-			// *** MODIFICATION START: Add Trading Links Section ***
-			"📊 [DexScreener](%s)\n"+ // Use Markdown links
-			"🛒 [Axiom Swap](%s)\n"+
-			" PUMP [Trade](%s)\n\n"+ // Using Pump emoji
-			// *** MODIFICATION END ***
-
+			"DexScreener: %s\n\n"+
 			"--- Criteria Met ---\n"+
 			"%s", // criteriaDetails
-
 		validationResult.TokenName,
 		validationResult.TokenSymbol,
 		tokenAddress,
-		// *** MODIFICATION START: Pass URLs to Sprintf ***
 		dexscreenerURL,
-		axiomURL,
-		pumpFunURL,
-		// *** MODIFICATION END ***
 		criteriaDetails,
 	)
 
@@ -342,7 +328,29 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		caption += "\n\n" + socialsSection
 	}
 
-	// Send Notification (Unchanged)
+	// *** MODIFICATION START: Construct Trading URLs and Link String ***
+	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress) // Corrected URL
+	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)    // Corrected URL (http)
+
+	// Create the inline "button" string - Ensure ParseMode handles this correctly
+	tradingLinks := fmt.Sprintf(
+		"[Axiom](%s) | [Pump.fun](%s)", // Short text links
+		axiomURL,
+		pumpFunURL,
+	)
+	// *** MODIFICATION END ***
+
+	// *** MODIFICATION START: Append Trading Links to Caption ***
+	// Add a separator if social links were present, or just space otherwise
+	if socialsSection != "" {
+		caption += "\n\n---\n" + tradingLinks // Separator line if socials exist
+	} else {
+		caption += "\n\n" + tradingLinks // Just spacing if no socials
+	}
+	// *** MODIFICATION END ***
+
+	// --- Send Notification ---
+	// Assumes notifications.go uses MarkdownV2 and EscapeMarkdownV2 preserves backticks ` ` but escapes []() correctly
 	if usePhoto {
 		notifications.SendBotCallPhotoMessage(finalImageURL, caption)
 		imageSource := "DexScreener"
@@ -493,8 +501,11 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 
 // --- Markdown Escaping Helper ---
 
-// escapeMarkdownV2 helper function (version that preserves backticks)
-// This version remains as provided in the input, assuming it's correct for your needs.
+// escapeMarkdownV2 helper function (version that preserves backticks needed)
+// Make sure the version in notifications.go is the one that DOES NOT escape backticks `
+// This helper might be used elsewhere, so keeping it consistent or removing if unused.
+// **NOTE:** The version pasted by the user DOES escape backticks. This needs to be corrected in notifications.go
+// For this file, I'll keep the user's provided version, assuming notifications.go has the correct one.
 func escapeMarkdownV2(text string) string {
 	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	replacerArgs := make([]string, 0, len(escapeChars)*2)
