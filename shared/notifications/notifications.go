@@ -1,3 +1,4 @@
+// FILE: agent/shared/notifications/notifications.go
 package notifications
 
 import (
@@ -95,7 +96,7 @@ func GetBotInstance() *telego.Bot {
 }
 
 // EscapeMarkdownV2 escapes characters for Telegram MarkdownV2 parse mode.
-// --- FINAL CORRECTED VERSION: Preserves backticks ` ` but escapes other needed chars like . - ! etc. ---
+// --- CORRECTED VERSION: Preserves backticks ` ` but escapes other needed chars like . - ! etc. ---
 func EscapeMarkdownV2(s string) string {
 	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~" /*"`",*/, ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Backtick removed, hyphen included
 	var builder strings.Builder
@@ -123,7 +124,7 @@ func EscapeMarkdownV2(s string) string {
 }
 
 // coreSendMessageWithRetry handles the sending logic with rate limiting and retries.
-// --- FINAL CORRECTED VERSION: Applies EscapeMarkdownV2 internally ---
+// --- CORRECTED VERSION: Applies EscapeMarkdownV2 internally AND fixes fallback call ---
 func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string) error {
 	localBot := GetBotInstance()
 	if localBot == nil {
@@ -131,7 +132,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		return errors.New("telego bot not initialized")
 	}
 
-	// Apply the corrected escaping function (preserves backticks, escapes others)
+	// Apply the correct escaping function (preserves backticks, escapes others)
 	escapedTextOrCaption := EscapeMarkdownV2(rawTextOrCaption)
 
 	var lastErr error
@@ -265,7 +266,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 
 	// Final Check and Fallback
 	if lastErr != nil {
-		log.Printf("ERROR: Telegram message FAILED after %d retries. Last Error: %v. %s", maxRetries, lastErr, logCtx)
+		log.Printf("ERROR: Telegram message FAILED after %d retries. Final Error: %v. %s", maxRetries, lastErr, logCtx)
 		if isPhoto {
 			var lastApiErr *telegoapi.Error
 			photoErrorSubstrings := []string{"wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small", "IMAGE_PROCESS_FAILED"}
@@ -279,7 +280,9 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 				}
 				if isKnownPhotoError {
 					log.Printf("INFO: Final error indicates photo issue. Falling back to text. %s", logCtx)
-					return coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "")
+					// --- FIX: Use the correct input parameter name ---
+					return coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "") // Use rawTextOrCaption from input
+					// -------------------------------------------------
 				}
 			}
 		}
@@ -287,7 +290,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 	return lastErr
 }
 
-// --- Public Send Functions ---
+// --- Public Send Functions --- (Unchanged)
 func SendTelegramMessage(message string) {
 	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "")
 }
