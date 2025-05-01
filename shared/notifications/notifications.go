@@ -38,12 +38,15 @@ const (
 func InitTelegramBot() error {
 	initMutex.Lock()
 	defer initMutex.Unlock()
+
 	if isInitialized {
 		log.Println("INFO: Telegram bot (Telego) already initialized.")
 		return nil
 	}
+
 	botToken := env.TelegramBotToken
 	parsedGroupID := env.TelegramGroupID
+
 	if botToken == "" {
 		log.Println("WARN: TELEGRAM_BOT_TOKEN missing. Telegram notifications disabled.")
 		isInitialized = false
@@ -56,7 +59,9 @@ func InitTelegramBot() error {
 		bot = nil
 		return nil
 	}
+
 	defaultGroupID = parsedGroupID
+
 	log.Println("INFO: Initializing Telegram bot (Telego)...")
 	var err error
 	bot, err = telego.NewBot(botToken, telego.WithDefaultDebugLogger())
@@ -66,6 +71,7 @@ func InitTelegramBot() error {
 		isInitialized = false
 		return fmt.Errorf("failed to initialize Telego bot: %w", err)
 	}
+
 	log.Println("INFO: Verifying bot token with Telegram API (GetMe via Telego)...")
 	botUser, err := bot.GetMe(context.Background())
 	if err != nil {
@@ -74,6 +80,7 @@ func InitTelegramBot() error {
 		isInitialized = false
 		return fmt.Errorf("failed to verify bot token with GetMe (Telego): %w", err)
 	}
+
 	telegramLimiter = rate.NewLimiter(rate.Limit(telegramMessagesPerSecond), telegramBurstLimit)
 	isInitialized = true
 	log.Printf("INFO: Telegram bot (Telego) initialized successfully for @%s", botUser.Username)
@@ -85,6 +92,7 @@ func InitTelegramBot() error {
 	if env.TrackingThreadID != 0 {
 		log.Printf("INFO: Tracking Thread ID: %d", env.TrackingThreadID)
 	}
+
 	return nil
 }
 
@@ -96,15 +104,17 @@ func GetBotInstance() *telego.Bot {
 }
 
 // EscapeMarkdownV2 escapes characters for Telegram MarkdownV2 parse mode.
-// --- CORRECTED VERSION: Preserves backticks ` ` but escapes other needed chars like . - ! etc. ---
+// --- FINAL CORRECTED VERSION: Preserves backticks ` AND pipe | ---
 func EscapeMarkdownV2(s string) string {
-	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~" /*"`",*/, ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Backtick removed, hyphen included
+	// Characters listed by Telegram for escaping in MarkdownV2 *EXCEPT* backtick ` and pipe |
+	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~" /*"`",*/ /*"|",*/, ">", "#", "+", "-", "=" /*"|",*/, "{", "}", ".", "!"} // Backtick and pipe removed/commented
 	var builder strings.Builder
-	builder.Grow(len(s) + 20) // Preallocate buffer
+	builder.Grow(len(s) + 20) // Preallocate buffer slightly larger
 	for _, r := range s {
 		char := string(r)
 		shouldEscape := false
-		if char == "`" { // Do NOT escape backticks
+		// --- Do NOT escape backticks OR pipes ---
+		if char == "`" || char == "|" {
 			shouldEscape = false
 		} else {
 			// Check if other characters need escaping
@@ -115,6 +125,7 @@ func EscapeMarkdownV2(s string) string {
 				}
 			}
 		}
+
 		if shouldEscape {
 			builder.WriteRune('\\')
 		}
@@ -124,7 +135,7 @@ func EscapeMarkdownV2(s string) string {
 }
 
 // coreSendMessageWithRetry handles the sending logic with rate limiting and retries.
-// --- CORRECTED VERSION: Applies EscapeMarkdownV2 internally AND fixes fallback call ---
+// --- FINAL CORRECTED VERSION: Applies the corrected EscapeMarkdownV2 internally ---
 func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string) error {
 	localBot := GetBotInstance()
 	if localBot == nil {
@@ -132,7 +143,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		return errors.New("telego bot not initialized")
 	}
 
-	// Apply the correct escaping function (preserves backticks, escapes others)
+	// Apply the CORRECTED escaping function (preserves backticks AND pipes, escapes others)
 	escapedTextOrCaption := EscapeMarkdownV2(rawTextOrCaption)
 
 	var lastErr error
@@ -164,13 +175,18 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		var currentErr error
 		var sentMsg *telego.Message
 
+		// Explicitly Log Before Sending (using the *escaped* version being sent)
+		logPayload := fmt.Sprintf("Payload: %s", escapedTextOrCaption)
+		if len(logPayload) > 1000 {
+			logPayload = logPayload[:1000] + "..."
+		}
+		log.Printf("DEBUG: Attempting Send API Call %s (Attempt %d/%d). %s", logCtx, attempt+1, maxRetries, logPayload)
+
 		if isPhoto {
-			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send ESCAPED version
-			log.Printf("DEBUG: Attempting SendPhoto %s (Attempt %d/%d)", logCtx, attempt+1, maxRetries)
+			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID}
 			sentMsg, currentErr = localBot.SendPhoto(ctx, params)
 		} else {
-			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send ESCAPED version
-			log.Printf("DEBUG: Attempting SendMessage %s (Attempt %d/%d)", logCtx, attempt+1, maxRetries)
+			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID}
 			sentMsg, currentErr = localBot.SendMessage(ctx, params)
 		}
 		cancel()
@@ -181,6 +197,13 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 			return nil
 		}
 
+		// Explicitly Log Error After Sending Attempt
+		if currentErr != nil {
+			log.Printf("ERROR: Send API Call FAILED %s (Attempt %d/%d). Error: %v", logCtx, attempt+1, maxRetries, currentErr)
+		} else {
+			log.Printf("WARN: Send API Call SUCCEEDED according to error status but MsgID is 0 %s (Attempt %d/%d).", logCtx, attempt+1, maxRetries)
+		}
+
 		// Error Handling & Retry Logic
 		lastErr = currentErr
 		shouldRetry := false
@@ -188,16 +211,14 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		if currentErr != nil {
 			var apiErr *telegoapi.Error
 			if errors.As(currentErr, &apiErr) {
-				log.Printf("WARN: Telegram API Error (Attempt %d/%d): Code=%d, Desc=%s %s", attempt+1, maxRetries, apiErr.ErrorCode, apiErr.Description, logCtx)
+				// Log already happened above, just decide on retry logic
 				if apiErr.ErrorCode == 429 && apiErr.Parameters != nil {
 					specificRetryAfter = apiErr.Parameters.RetryAfter
 					shouldRetry = true
-					log.Printf("INFO: Rate limit hit, retry after %d s %s", specificRetryAfter, logCtx)
 				} else if apiErr.ErrorCode == 400 {
 					if strings.Contains(apiErr.Description, "can't parse entities") {
-						log.Printf("ERROR: MarkdownV2 parsing error: %s. Aborting retries. Check input text and EscapeMarkdownV2 func. %s", apiErr.Description, logCtx)
 						shouldRetry = false
-					} else {
+					} else { // Abort on parse errors
 						nonRetryableSubstrings := []string{"thread not found", "chat not found", "wrong type of chat", "message text is empty"}
 						photoErrorSubstrings := []string{"wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small", "IMAGE_PROCESS_FAILED"}
 						isNonRetryable := false
@@ -209,7 +230,6 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 						}
 						if isNonRetryable {
 							shouldRetry = false
-							log.Printf("ERROR: Non-retryable API error 400: %s. Aborting. %s", apiErr.Description, logCtx)
 						} else {
 							isKnownPhotoError := false
 							if isPhoto {
@@ -221,30 +241,23 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 								}
 							}
 							if isKnownPhotoError {
-								shouldRetry = false
-								log.Printf("WARN: Photo-specific error 400: %s. Will attempt fallback. %s", apiErr.Description, logCtx)
+								shouldRetry = false /* Fallback happens after loop */
 							} else {
 								shouldRetry = false
-								log.Printf("WARN: Uncategorized API error 400: %s. Aborting retry. %s", apiErr.Description, logCtx)
-							}
+							} // Don't retry other 400s
 						}
 					}
 				} else if apiErr.ErrorCode == 403 || apiErr.ErrorCode == 401 || apiErr.ErrorCode == 404 {
 					shouldRetry = false
-					log.Printf("ERROR: Non-retryable API error %d: %s. Aborting. %s", apiErr.ErrorCode, apiErr.Description, logCtx)
 				} else {
 					shouldRetry = true
-					log.Printf("INFO: Retrying potentially temporary API error %d: %s %s", apiErr.ErrorCode, apiErr.Description, logCtx)
-				}
+				} // Retry other API errors (like 5xx)
 			} else {
-				log.Printf("WARN: Failed Send (Attempt %d/%d): Network/Other error: %v %s", attempt+1, maxRetries, currentErr, logCtx)
 				shouldRetry = true
-			}
+			} // Retry network errors
 		} else {
-			log.Printf("WARN: Send attempt %d/%d ok but no message ID. Retrying. %s", attempt+1, maxRetries, logCtx)
-			lastErr = errors.New("send ok but message ID missing")
 			shouldRetry = true
-		}
+		} // Retry missing message ID
 
 		// Exit or Wait
 		if !shouldRetry || attempt >= maxRetries-1 {
@@ -280,9 +293,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 				}
 				if isKnownPhotoError {
 					log.Printf("INFO: Final error indicates photo issue. Falling back to text. %s", logCtx)
-					// --- FIX: Use the correct input parameter name ---
-					return coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "") // Use rawTextOrCaption from input
-					// -------------------------------------------------
+					return coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "")
 				}
 			}
 		}
@@ -290,7 +301,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 	return lastErr
 }
 
-// --- Public Send Functions --- (Unchanged)
+// --- Public Send Functions ---
 func SendTelegramMessage(message string) {
 	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "")
 }
