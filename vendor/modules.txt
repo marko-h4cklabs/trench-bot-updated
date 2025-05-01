@@ -200,6 +200,8 @@ github.com/modern-go/reflect2
 github.com/mymmrac/telego
 github.com/mymmrac/telego/internal/json
 github.com/mymmrac/telego/telegoapi
+github.com/mymmrac/telego/telegohandler
+github.com/mymmrac/telego/telegoutil
 # github.com/pelletier/go-toml/v2 v2.2.3
 ## explicit; go 1.21.0
 github.com/pelletier/go-toml/v2

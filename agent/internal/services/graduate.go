@@ -1,3 +1,4 @@
+// FILE: agent/internal/services/graduate.go
 package services
 
 import (
@@ -5,7 +6,7 @@ import (
 	"ca-scraper/agent/internal/events"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
-	"ca-scraper/shared/notifications" // Needed for Send functions and EscapeMarkdownV2
+	"ca-scraper/shared/notifications" // Needed for Send functions
 	"encoding/json"
 	"fmt"
 	"io"
@@ -233,10 +234,8 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 	appLogger.Info("Graduated token passed validation! Preparing notification...", tokenField)
 
-	// Build Criteria Details (Plain Text)
+	// Build Criteria & Socials Sections
 	criteriaDetails := fmt.Sprintf("🩸 Liquidity: $%.0f\n🏛️ Market Cap: $%.0f\n⌛ (5m) Volume : $%.0f\n⏳ (1h) Volume : $%.0f\n🔎 (5m) TXNs : %d\n🔍 (1h) TXNs : %d", validationResult.LiquidityUSD, validationResult.MarketCap, validationResult.Volume5m, validationResult.Volume1h, validationResult.Txns5m, validationResult.Txns1h)
-
-	// Build Socials Section (Plain Text URLs)
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
 	if validationResult.WebsiteURL != "" {
@@ -298,13 +297,10 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Debug("No image URL, sending text.", tokenField)
 	}
 
-	// Construct Trading URLs
+	// Construct Dexscreener URL
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
-	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress)
-	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)
 
-	// --- Assemble the ENTIRE RAW caption string ---
-	// Let notifications.go handle the escaping just before sending.
+	// --- Assemble the RAW caption string (NO trading links here) ---
 	var captionBuilder strings.Builder
 
 	captionBuilder.WriteString(fmt.Sprintf("🚨Name: %s\n", validationResult.TokenName))
@@ -319,26 +315,31 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		captionBuilder.WriteString(socialsSectionRaw) // Append raw socials section
 		captionBuilder.WriteString("\n")
 	}
+	// Get the final raw string for caption *without* trading links
+	rawCaptionToSend := strings.TrimRight(captionBuilder.String(), "\n")
 
-	captionBuilder.WriteString("\n---\n") // Raw separator
-	// Raw Markdown links (escaping pipe/dot in text is optional but safer for V2)
-	captionBuilder.WriteString(fmt.Sprintf("[Axiom](%s)\n[Pump.fun](%s)", axiomURL, pumpFunURL))
+	// --- Construct Trading URLs and Button Map ---
+	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress)
+	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)
 
-	// Get the final raw string to send
-	rawCaptionToSend := captionBuilder.String()
+	// Create the map for buttons
+	buttons := map[string]string{
+		"🚀 Axiom":    axiomURL,
+		"🧪 Pump.fun": pumpFunURL,
+	}
 
-	// --- Send Notification ---
-	// Pass the rawCaptionToSend. notifications.go will apply EscapeMarkdownV2 internally.
+	// --- Send Notification WITH Buttons ---
+	// Pass the raw caption and the button map. notifications.go handles escaping internally.
 	if usePhoto {
-		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaptionToSend)
+		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaptionToSend, buttons) // Pass buttons map
 		imageSource := "DexScreener"
 		if heliusErr == nil && heliusImageURL != "" && finalImageURL == heliusImageURL {
 			imageSource = "Helius"
 		}
-		appLogger.Info("Telegram 'Bot Call' photo initiated", tokenField, zap.String("name", validationResult.TokenName), zap.String("imageSource", imageSource))
+		appLogger.Info("Telegram 'Bot Call' photo initiated (with buttons)", tokenField, zap.String("name", validationResult.TokenName), zap.String("imageSource", imageSource))
 	} else {
-		notifications.SendBotCallMessage(rawCaptionToSend)
-		appLogger.Info("Telegram 'Bot Call' text initiated", tokenField, zap.String("name", validationResult.TokenName))
+		notifications.SendBotCallMessage(rawCaptionToSend, buttons) // Pass buttons map
+		appLogger.Info("Telegram 'Bot Call' text initiated (with buttons)", tokenField, zap.String("name", validationResult.TokenName))
 	}
 
 	// Update Caches and Tracking
@@ -430,13 +431,31 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 				appLogger.Debug("Progress calculation", tokenField, mcBaselineField, mcCurrentField, zap.Float64("highestMCRecorded", highestMCSeen), multiplierField, notifyLevelField, lastLevelField)
 				if athNotifyLevel > lastNotifiedLevel && athNotifyLevel >= 2 {
 					appLogger.Info("Token hit new notification level.", tokenField, mcBaselineField, zap.Float64("highestMC", highestMCSeen), notifyLevelField, lastLevelField)
-					dexScreenerLinkRaw := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
+
+					// *** FIX: Construct the DexScreener Link here ***
+					dexScreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
+
 					tokenNameStr := currentValidationResult.TokenName
 					if tokenNameStr == "" {
 						tokenNameStr = tokenAddress
 					}
-					// Pass raw string to notification function, let it handle escaping
-					progressMessage := fmt.Sprintf("🚀 Token Progress: *%s*\n\nHit: *%dx*\n\nInitial MC: `$%.0f`\nATH MC: `$%.0f`\n\n📊 [DexScreener](%s)", tokenNameStr, athNotifyLevel, baselineMarketCap, highestMCSeen, dexScreenerLinkRaw)
+
+					// *** FIX: Format the message correctly using the link ***
+					// Let notifications package handle escaping for the tracking message
+					progressMessage := fmt.Sprintf(
+						"🚀 *Token Progress Alert*\n\n"+
+							"📛 *Name:* %s\n"+
+							"📈 *Milestone:* %dx ATH\n\n"+
+							"💰 *Initial MC:* `$%.0f`\n"+
+							"🔺 *ATH MC:* `$%.0f`\n\n"+
+							"📊 [View on DexScreener](%s)",
+						tokenNameStr,
+						athNotifyLevel,
+						baselineMarketCap,
+						highestMCSeen,
+						dexScreenerLink,
+					)
+
 					notifications.SendTrackingUpdateMessage(progressMessage)
 					appLogger.Info("Sent ATH tracking update notification.", tokenField, notifyLevelField)
 					infoToUpdate := trackedInfo

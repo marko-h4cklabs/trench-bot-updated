@@ -15,6 +15,7 @@ import (
 
 	"github.com/mymmrac/telego"
 	"github.com/mymmrac/telego/telegoapi"
+	"github.com/mymmrac/telego/telegoutil"
 	"golang.org/x/time/rate"
 )
 
@@ -43,10 +44,8 @@ func InitTelegramBot() error {
 		log.Println("INFO: Telegram bot (Telego) already initialized.")
 		return nil
 	}
-
 	botToken := env.TelegramBotToken
 	parsedGroupID := env.TelegramGroupID
-
 	if botToken == "" {
 		log.Println("WARN: TELEGRAM_BOT_TOKEN missing. Telegram notifications disabled.")
 		isInitialized = false
@@ -59,9 +58,7 @@ func InitTelegramBot() error {
 		bot = nil
 		return nil
 	}
-
 	defaultGroupID = parsedGroupID
-
 	log.Println("INFO: Initializing Telegram bot (Telego)...")
 	var err error
 	bot, err = telego.NewBot(botToken, telego.WithDefaultDebugLogger())
@@ -71,7 +68,6 @@ func InitTelegramBot() error {
 		isInitialized = false
 		return fmt.Errorf("failed to initialize Telego bot: %w", err)
 	}
-
 	log.Println("INFO: Verifying bot token with Telegram API (GetMe via Telego)...")
 	botUser, err := bot.GetMe(context.Background())
 	if err != nil {
@@ -80,7 +76,6 @@ func InitTelegramBot() error {
 		isInitialized = false
 		return fmt.Errorf("failed to verify bot token with GetMe (Telego): %w", err)
 	}
-
 	telegramLimiter = rate.NewLimiter(rate.Limit(telegramMessagesPerSecond), telegramBurstLimit)
 	isInitialized = true
 	log.Printf("INFO: Telegram bot (Telego) initialized successfully for @%s", botUser.Username)
@@ -92,7 +87,6 @@ func InitTelegramBot() error {
 	if env.TrackingThreadID != 0 {
 		log.Printf("INFO: Tracking Thread ID: %d", env.TrackingThreadID)
 	}
-
 	return nil
 }
 
@@ -104,20 +98,17 @@ func GetBotInstance() *telego.Bot {
 }
 
 // EscapeMarkdownV2 escapes characters for Telegram MarkdownV2 parse mode.
-// --- FINAL CORRECTED VERSION: Preserves backticks ` AND pipe | ---
+// --- CORRECTED VERSION: Preserves backticks ` AND pipe | ---
 func EscapeMarkdownV2(s string) string {
-	// Characters listed by Telegram for escaping in MarkdownV2 *EXCEPT* backtick ` and pipe |
 	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~" /*"`",*/ /*"|",*/, ">", "#", "+", "-", "=" /*"|",*/, "{", "}", ".", "!"} // Backtick and pipe removed/commented
 	var builder strings.Builder
 	builder.Grow(len(s) + 20) // Preallocate buffer slightly larger
 	for _, r := range s {
 		char := string(r)
 		shouldEscape := false
-		// --- Do NOT escape backticks OR pipes ---
 		if char == "`" || char == "|" {
 			shouldEscape = false
-		} else {
-			// Check if other characters need escaping
+		} else { // Do NOT escape backticks OR pipes
 			for _, esc := range charsToEscape {
 				if char == esc {
 					shouldEscape = true
@@ -125,7 +116,6 @@ func EscapeMarkdownV2(s string) string {
 				}
 			}
 		}
-
 		if shouldEscape {
 			builder.WriteRune('\\')
 		}
@@ -134,16 +124,16 @@ func EscapeMarkdownV2(s string) string {
 	return builder.String()
 }
 
-// coreSendMessageWithRetry handles the sending logic with rate limiting and retries.
-// --- FINAL CORRECTED VERSION: Applies the corrected EscapeMarkdownV2 internally ---
-func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string) error {
+// coreSendMessageWithRetry handles sending logic with rate limiting and retries.
+// --- MODIFIED: Added optional replyMarkup parameter ---
+func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string, replyMarkup telego.ReplyMarkup) error { // Added replyMarkup
 	localBot := GetBotInstance()
 	if localBot == nil {
 		log.Printf("WARN: coreSendMessageWithRetry: Bot not initialized (ChatID: %d).", chatID)
 		return errors.New("telego bot not initialized")
 	}
 
-	// Apply the CORRECTED escaping function (preserves backticks AND pipes, escapes others)
+	// Apply the corrected escaping function (preserves backticks AND pipes, escapes others)
 	escapedTextOrCaption := EscapeMarkdownV2(rawTextOrCaption)
 
 	var lastErr error
@@ -175,7 +165,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		var currentErr error
 		var sentMsg *telego.Message
 
-		// Explicitly Log Before Sending (using the *escaped* version being sent)
+		// Log before sending
 		logPayload := fmt.Sprintf("Payload: %s", escapedTextOrCaption)
 		if len(logPayload) > 1000 {
 			logPayload = logPayload[:1000] + "..."
@@ -183,10 +173,10 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		log.Printf("DEBUG: Attempting Send API Call %s (Attempt %d/%d). %s", logCtx, attempt+1, maxRetries, logPayload)
 
 		if isPhoto {
-			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID}
+			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID, ReplyMarkup: replyMarkup} // Pass replyMarkup
 			sentMsg, currentErr = localBot.SendPhoto(ctx, params)
 		} else {
-			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID}
+			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID, ReplyMarkup: replyMarkup} // Pass replyMarkup
 			sentMsg, currentErr = localBot.SendMessage(ctx, params)
 		}
 		cancel()
@@ -197,28 +187,27 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 			return nil
 		}
 
-		// Explicitly Log Error After Sending Attempt
+		// Log error after sending attempt
 		if currentErr != nil {
 			log.Printf("ERROR: Send API Call FAILED %s (Attempt %d/%d). Error: %v", logCtx, attempt+1, maxRetries, currentErr)
 		} else {
 			log.Printf("WARN: Send API Call SUCCEEDED according to error status but MsgID is 0 %s (Attempt %d/%d).", logCtx, attempt+1, maxRetries)
 		}
 
-		// Error Handling & Retry Logic
+		// Error Handling & Retry Logic (robust version - unchanged)
 		lastErr = currentErr
 		shouldRetry := false
 		specificRetryAfter := 0
 		if currentErr != nil {
 			var apiErr *telegoapi.Error
 			if errors.As(currentErr, &apiErr) {
-				// Log already happened above, just decide on retry logic
 				if apiErr.ErrorCode == 429 && apiErr.Parameters != nil {
 					specificRetryAfter = apiErr.Parameters.RetryAfter
 					shouldRetry = true
 				} else if apiErr.ErrorCode == 400 {
 					if strings.Contains(apiErr.Description, "can't parse entities") {
 						shouldRetry = false
-					} else { // Abort on parse errors
+					} else {
 						nonRetryableSubstrings := []string{"thread not found", "chat not found", "wrong type of chat", "message text is empty"}
 						photoErrorSubstrings := []string{"wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small", "IMAGE_PROCESS_FAILED"}
 						isNonRetryable := false
@@ -244,20 +233,20 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 								shouldRetry = false /* Fallback happens after loop */
 							} else {
 								shouldRetry = false
-							} // Don't retry other 400s
+							}
 						}
 					}
 				} else if apiErr.ErrorCode == 403 || apiErr.ErrorCode == 401 || apiErr.ErrorCode == 404 {
 					shouldRetry = false
 				} else {
 					shouldRetry = true
-				} // Retry other API errors (like 5xx)
+				}
 			} else {
 				shouldRetry = true
-			} // Retry network errors
+			}
 		} else {
 			shouldRetry = true
-		} // Retry missing message ID
+		}
 
 		// Exit or Wait
 		if !shouldRetry || attempt >= maxRetries-1 {
@@ -293,49 +282,94 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 				}
 				if isKnownPhotoError {
 					log.Printf("INFO: Final error indicates photo issue. Falling back to text. %s", logCtx)
-					return coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "")
+					return coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "", nil)
 				}
-			}
+			} // Pass nil for markup on fallback
 		}
 	}
 	return lastErr
 }
 
 // --- Public Send Functions ---
+
+// SendTelegramMessage sends a standard text message to the default group.
 func SendTelegramMessage(message string) {
-	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "")
+	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "", nil) // Pass nil for markup
 }
-func SendBotCallMessage(message string) {
+
+// SendBotCallMessage sends a text message, potentially with buttons, to the Bot Calls topic thread.
+func SendBotCallMessage(message string, buttons ...map[string]string) { // Use variadic args for optional buttons
 	threadID := env.BotCallsThreadID
 	if threadID == 0 {
 		log.Println("WARN: Bot Calls thread ID not set, sending to main group.")
 		threadID = 0
 	}
-	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "")
+
+	var replyMarkup *telego.InlineKeyboardMarkup
+	if len(buttons) > 0 && len(buttons[0]) > 0 {
+		// Build inline buttons if provided
+		var rows [][]telego.InlineKeyboardButton
+		var row []telego.InlineKeyboardButton
+		// Assume only one map is passed, put all its buttons on one row
+		for label, url := range buttons[0] {
+			btn := telegoutil.InlineKeyboardButton(url).WithText(label) // URL button
+			row = append(row, btn)
+		}
+		if len(row) > 0 {
+			rows = append(rows, row)
+			replyMarkup = &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
+		}
+	}
+
+	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "", replyMarkup) // Pass potential markup
 }
-func SendBotCallPhotoMessage(photoURL string, caption string) {
+
+// SendBotCallPhotoMessage sends a photo with caption, potentially with buttons, to the Bot Calls topic thread.
+func SendBotCallPhotoMessage(photoURL string, caption string, buttons ...map[string]string) { // Use variadic args for optional buttons
 	threadID := env.BotCallsThreadID
 	if threadID == 0 {
 		log.Println("WARN: Bot Calls thread ID not set, sending caption as text to main group.")
-		_ = coreSendMessageWithRetry(defaultGroupID, 0, caption, false, "")
+		_ = coreSendMessageWithRetry(defaultGroupID, 0, caption, false, "", nil) // Fallback to text in main group, no buttons
 		return
 	}
 	parsedURL, urlErr := url.ParseRequestURI(photoURL)
 	if urlErr != nil || !(parsedURL.Scheme == "http" || parsedURL.Scheme == "https") {
-		log.Printf("ERROR: Invalid photo URL format: %s - %v. Falling back to text.", photoURL, urlErr)
-		_ = coreSendMessageWithRetry(defaultGroupID, threadID, caption, false, "")
+		log.Printf("ERROR: Invalid photo URL format: %s - %v. Falling back to sending caption as text message.", photoURL, urlErr)
+		// Fallback to text, but try to include buttons if provided
+		SendBotCallMessage(caption, buttons...) // Call the text version which handles buttons
 		return
 	}
-	_ = coreSendMessageWithRetry(defaultGroupID, threadID, caption, true, photoURL)
+
+	var replyMarkup *telego.InlineKeyboardMarkup
+	if len(buttons) > 0 && len(buttons[0]) > 0 {
+		// Build inline buttons if provided
+		var rows [][]telego.InlineKeyboardButton
+		var row []telego.InlineKeyboardButton
+		// Assume only one map is passed, put all its buttons on one row
+		for label, url := range buttons[0] {
+			btn := telegoutil.InlineKeyboardButton(url).WithText(label) // URL button
+			row = append(row, btn)
+		}
+		if len(row) > 0 {
+			rows = append(rows, row)
+			replyMarkup = &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
+		}
+	}
+
+	_ = coreSendMessageWithRetry(defaultGroupID, threadID, caption, true, photoURL, replyMarkup) // Pass potential markup
 }
-func SendTrackingUpdateMessage(message string) {
+
+// SendTrackingUpdateMessage sends a text message to the Tracking topic thread.
+func SendTrackingUpdateMessage(message string) { // No buttons needed for tracking usually
 	threadID := env.TrackingThreadID
 	if threadID == 0 {
 		log.Println("WARN: Tracking thread ID not set, sending to main group.")
 		threadID = 0
 	}
-	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "")
+	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "", nil) // Pass nil for markup
 }
+
+// SendVerificationSuccessMessage sends a direct message to a user upon successful verification.
 func SendVerificationSuccessMessage(userID int64, groupLink string) error {
 	if groupLink == "" {
 		log.Println("ERROR: Target group link empty for verification success msg.")
@@ -348,7 +382,8 @@ func SendVerificationSuccessMessage(userID int64, groupLink string) error {
 		log.Printf("ERROR: Bot nil for verification success msg to user %d.", userID)
 		return errors.New("bot instance nil.")
 	}
-	err := coreSendMessageWithRetry(userID, 0, messageText, false, "")
+	// Send directly to user, no buttons needed here usually
+	err := coreSendMessageWithRetry(userID, 0, messageText, false, "", nil) // Pass nil for markup
 	if err != nil {
 		log.Printf("ERROR: Failed to send verification success msg to user %d: %v", userID, err)
 	} else {
