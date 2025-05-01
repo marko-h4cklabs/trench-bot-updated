@@ -33,19 +33,17 @@ const (
 	maxRetryWait              = 60 * time.Second
 )
 
-// InitTelegramBot initializes the Telegram bot and rate limiter.
+// InitTelegramBot unchanged...
 func InitTelegramBot() error {
+	// ... (same as previous correct version) ...
 	initMutex.Lock()
 	defer initMutex.Unlock()
-
 	if isInitialized {
 		log.Println("INFO: Telegram bot (Telego) already initialized.")
 		return nil
 	}
-
 	botToken := env.TelegramBotToken
 	parsedGroupID := env.TelegramGroupID
-
 	if botToken == "" {
 		log.Println("WARN: TELEGRAM_BOT_TOKEN missing. Telegram notifications disabled.")
 		isInitialized = false
@@ -58,9 +56,7 @@ func InitTelegramBot() error {
 		bot = nil
 		return nil
 	}
-
 	defaultGroupID = parsedGroupID
-
 	log.Println("INFO: Initializing Telegram bot (Telego)...")
 	var err error
 	bot, err = telego.NewBot(botToken, telego.WithDefaultDebugLogger())
@@ -70,7 +66,6 @@ func InitTelegramBot() error {
 		isInitialized = false
 		return fmt.Errorf("failed to initialize Telego bot: %w", err)
 	}
-
 	log.Println("INFO: Verifying bot token with Telegram API (GetMe via Telego)...")
 	botUser, err := bot.GetMe(context.Background())
 	if err != nil {
@@ -79,7 +74,6 @@ func InitTelegramBot() error {
 		isInitialized = false
 		return fmt.Errorf("failed to verify bot token with GetMe (Telego): %w", err)
 	}
-
 	telegramLimiter = rate.NewLimiter(rate.Limit(telegramMessagesPerSecond), telegramBurstLimit)
 	isInitialized = true
 	log.Printf("INFO: Telegram bot (Telego) initialized successfully for @%s", botUser.Username)
@@ -91,11 +85,10 @@ func InitTelegramBot() error {
 	if env.TrackingThreadID != 0 {
 		log.Printf("INFO: Tracking Thread ID: %d", env.TrackingThreadID)
 	}
-
 	return nil
 }
 
-// GetBotInstance returns the initialized bot instance or nil.
+// GetBotInstance unchanged...
 func GetBotInstance() *telego.Bot {
 	initMutex.Lock()
 	defer initMutex.Unlock()
@@ -103,12 +96,12 @@ func GetBotInstance() *telego.Bot {
 }
 
 // EscapeMarkdownV2 escapes characters for Telegram MarkdownV2 parse mode.
-// --- CORRECTED VERSION: Preserves backticks ` ---
+// --- CORRECTED: Added hyphen - to the escape list, kept backtick ` excluded ---
 func EscapeMarkdownV2(s string) string {
-	// Characters listed by Telegram for escaping in MarkdownV2 *EXCEPT* backtick `
-	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~" /*"`",*/, ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Backtick removed/commented out
+	// Added '-' to the list of characters to escape
+	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~" /*"`",*/, ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Added '-' back
 	var builder strings.Builder
-	builder.Grow(len(s) + 10)
+	builder.Grow(len(s) + 20) // Increased buffer slightly
 	for _, r := range s {
 		char := string(r)
 		shouldEscape := false
@@ -134,7 +127,7 @@ func EscapeMarkdownV2(s string) string {
 }
 
 // coreSendMessageWithRetry handles the sending logic with rate limiting and retries.
-// --- CORRECTED VERSION: Removed internal escaping ---
+// --- CORRECTED VERSION: Re-enabled internal escaping, assumes caller sends RAW text ---
 func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string) error {
 	localBot := GetBotInstance()
 	if localBot == nil {
@@ -142,10 +135,10 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		return errors.New("telego bot not initialized")
 	}
 
-	// === FIX: Use the raw text/caption directly ===
-	// Escaping is now handled selectively by the caller (graduate.go)
-	textOrCaptionToSend := rawTextOrCaption
-	// ==============================================
+	// === FIX: Re-enable escaping HERE using the corrected EscapeMarkdownV2 ===
+	// This function will now handle escaping '.', '-', '!', etc. but preserve backticks `` ` ``
+	escapedTextOrCaption := EscapeMarkdownV2(rawTextOrCaption)
+	// =======================================================================
 
 	var lastErr error
 	logCtx := fmt.Sprintf("[ChatID: %d]", chatID)
@@ -177,11 +170,11 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		var sentMsg *telego.Message
 
 		if isPhoto {
-			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: textOrCaptionToSend, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send UNESCAPED textOrCaptionToSend
+			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send ESCAPED textOrCaptionToSend
 			log.Printf("DEBUG: Attempting SendPhoto %s (Attempt %d/%d)", logCtx, attempt+1, maxRetries)
 			sentMsg, currentErr = localBot.SendPhoto(ctx, params)
 		} else {
-			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: textOrCaptionToSend, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send UNESCAPED textOrCaptionToSend
+			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send ESCAPED textOrCaptionToSend
 			log.Printf("DEBUG: Attempting SendMessage %s (Attempt %d/%d)", logCtx, attempt+1, maxRetries)
 			sentMsg, currentErr = localBot.SendMessage(ctx, params)
 		}
@@ -207,7 +200,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 					log.Printf("INFO: Rate limit hit, retry after %d s %s", specificRetryAfter, logCtx)
 				} else if apiErr.ErrorCode == 400 {
 					if strings.Contains(apiErr.Description, "can't parse entities") {
-						log.Printf("ERROR: MarkdownV2 parsing error: %s. Aborting retries. Check caller escaping. %s", apiErr.Description, logCtx)
+						log.Printf("ERROR: MarkdownV2 parsing error: %s. Aborting retries. Check input text and escaping. %s", apiErr.Description, logCtx)
 						shouldRetry = false
 					} else {
 						nonRetryableSubstrings := []string{"thread not found", "chat not found", "wrong type of chat", "message text is empty"}

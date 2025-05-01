@@ -5,7 +5,7 @@ import (
 	"ca-scraper/agent/internal/events"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
-	"ca-scraper/shared/notifications" // We will call notifications.EscapeMarkdownV2
+	"ca-scraper/shared/notifications" // Will call notifications.EscapeMarkdownV2 implicitly via send funcs
 	"encoding/json"
 	"fmt"
 	"io"
@@ -296,59 +296,49 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Debug("No image URL, sending text.", tokenField)
 	}
 
-	// Construct Dexscreener URL
+	// Construct Trading URLs
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
-
-	// Assemble Main Caption PART 1 (Info + Dexscreener Link + Criteria + Socials)
-	mainCaptionPart := fmt.Sprintf(
-		"🚨Name: %s\n"+
-			"🎯Symbol: $%s\n\n"+
-			"📃CA: `%s`\n\n"+ // Backticks for copy-on-tap
-			"📊 DexScreener: %s\n\n"+ // Dexscreener URL (will be escaped)
-			"--- Criteria Met ---\n"+
-			"%s", // criteriaDetails
-		validationResult.TokenName,
-		validationResult.TokenSymbol,
-		tokenAddress,
-		dexscreenerURL,
-		criteriaDetails,
-	)
-	if socialsSection != "" {
-		mainCaptionPart += "\n\n" + socialsSection
-	}
-
-	// Escape *only* the main part (this function MUST preserve backticks)
-	escapedMainCaption := notifications.EscapeMarkdownV2(mainCaptionPart)
-
-	// Construct Trading URLs and RAW Link String
 	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress)
 	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)
 
-	// Create the RAW Markdown string for links - DO NOT ESCAPE THIS PART
-	// Escape the pipe | and the dot . within the link TEXT only for V2
-	tradingLinksRaw := fmt.Sprintf(
-		"[Axiom](%s) \\| [Pump\\.fun](%s)",
-		axiomURL,
-		pumpFunURL,
-	)
+	// --- Assemble the ENTIRE RAW caption string ---
+	// Including Markdown links and backticks. Escaping will happen in notifications.go
+	var captionBuilder strings.Builder
 
-	// Combine Escaped Main Caption + Raw Trading Links
-	finalCaption := escapedMainCaption // Start with the escaped part
-	// Add separator and RAW links
-	finalCaption += "\n\n---\n" + tradingLinksRaw // Append trading links
+	captionBuilder.WriteString(fmt.Sprintf("🚨Name: %s\n", validationResult.TokenName))
+	captionBuilder.WriteString(fmt.Sprintf("🎯Symbol: $%s\n\n", validationResult.TokenSymbol))
+	captionBuilder.WriteString(fmt.Sprintf("📃CA: `%s`\n\n", tokenAddress)) // Backticks for copy-on-tap
+	// Use Markdown link for Dexscreener here as well
+	captionBuilder.WriteString(fmt.Sprintf("📊 [DexScreener](%s)\n\n", dexscreenerURL))
+	captionBuilder.WriteString("---\n")                              // Separator
+	captionBuilder.WriteString(fmt.Sprintf("%s\n", criteriaDetails)) // Criteria details
 
-	// Send Notification
-	// Pass the final, carefully constructed caption to the notification functions.
-	// These functions MUST send with ParseMode=MarkdownV2 and NOT apply further escaping.
+	// Append socials if they exist
+	if socialsSection != "" {
+		captionBuilder.WriteString("\n") // Add space before socials
+		captionBuilder.WriteString(socialsSection)
+		captionBuilder.WriteString("\n") // Add space after socials
+	}
+
+	// Append RAW Trading Links
+	captionBuilder.WriteString("\n---\n") // Separator before trading links
+	// Use raw Markdown links. Escaped pipe/dot in text is optional but safer for V2.
+	captionBuilder.WriteString(fmt.Sprintf("[Axiom](%s) \\| [Pump\\.fun](%s)", axiomURL, pumpFunURL))
+
+	// Get the final raw string
+	rawCaption := captionBuilder.String()
+
+	// --- Send Notification ---
+	// Pass the RAW caption. notifications.go will apply EscapeMarkdownV2 (which preserves backticks)
 	if usePhoto {
-		notifications.SendBotCallPhotoMessage(finalImageURL, finalCaption)
+		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaption)
 		imageSource := "DexScreener"
 		if heliusErr == nil && heliusImageURL != "" && finalImageURL == heliusImageURL {
 			imageSource = "Helius"
 		}
 		appLogger.Info("Telegram 'Bot Call' photo initiated", tokenField, zap.String("name", validationResult.TokenName), zap.String("imageSource", imageSource))
 	} else {
-		notifications.SendBotCallMessage(finalCaption)
+		notifications.SendBotCallMessage(rawCaption)
 		appLogger.Info("Telegram 'Bot Call' text initiated", tokenField, zap.String("name", validationResult.TokenName))
 	}
 
@@ -446,7 +436,8 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 					if tokenNameStr == "" {
 						tokenNameStr = tokenAddress
 					}
-					progressMessage := fmt.Sprintf("🚀 Token Progress: *%s*\n\nHit: *%dx*\n\nInitial MC: `$%.0f`\nATH MC: `$%.0f`\n\n📊 [DexScreener](%s)", escapeMarkdownV2(tokenNameStr), athNotifyLevel, baselineMarketCap, highestMCSeen, dexScreenerLinkRaw) // Using escape helper from this file
+					// Use the correct escape function (assuming it's in notifications pkg)
+					progressMessage := fmt.Sprintf("🚀 Token Progress: *%s*\n\nHit: *%dx*\n\nInitial MC: `$%.0f`\nATH MC: `$%.0f`\n\n📊 [DexScreener](%s)", notifications.EscapeMarkdownV2(tokenNameStr), athNotifyLevel, baselineMarketCap, highestMCSeen, dexScreenerLinkRaw)
 					notifications.SendTrackingUpdateMessage(progressMessage)
 					appLogger.Info("Sent ATH tracking update notification.", tokenField, notifyLevelField)
 					infoToUpdate := trackedInfo
@@ -486,8 +477,7 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 }
 
 // --- Markdown Escaping Helper ---
-// Note: This local helper is likely unused if escaping happens correctly in notifications.go
-// It's crucial that the one in notifications.go preserves backticks.
+// Can likely be removed from this file if notifications.go has the correct one.
 func escapeMarkdownV2(text string) string {
 	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	replacerArgs := make([]string, 0, len(escapeChars)*2)
@@ -498,4 +488,4 @@ func escapeMarkdownV2(text string) string {
 	return r.Replace(text)
 }
 
-// Assume CheckExistingHeliusWebhook and GetHeliusTokenImageURL functions exist elsewhere (e.g., in solana.go)
+// Assume CheckExistingHeliusWebhook and GetHeliusTokenImageURL functions exist in solana.go
