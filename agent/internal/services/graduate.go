@@ -1,4 +1,3 @@
-// FILE: agent/internal/services/graduate.go
 package services
 
 import (
@@ -6,7 +5,7 @@ import (
 	"ca-scraper/agent/internal/events"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
-	"ca-scraper/shared/notifications" // Needed for Send functions
+	"ca-scraper/shared/notifications"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,7 +19,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// --- Struct Definitions ---
 type TrackedTokenInfo struct {
 	BaselineMarketCap           float64
 	HighestMarketCapSeen        float64
@@ -54,12 +52,10 @@ type GraduatedTokenCache struct {
 
 var graduatedTokenCache = &GraduatedTokenCache{Data: make(map[string]time.Time)}
 
-// --- Constants ---
 const (
 	solAddress = "So11111111111111111111111111111111111111112"
 )
 
-// --- Webhook Setup ---
 func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	appLogger.Info("Setting up Graduation Webhook...", zap.String("url", webhookURL))
 	apiKey := env.HeliusAPIKey
@@ -161,7 +157,6 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	}
 }
 
-// --- Webhook Handling ---
 func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
 	appLogger.Debug("Received Graduation Webhook Payload", zap.Int("size", len(payload)))
 	if len(payload) == 0 {
@@ -190,7 +185,6 @@ func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
 	return processGraduatedToken(event, appLogger)
 }
 
-// --- Token Processing and Notification ---
 func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) error {
 	appLogger.Debug("Processing single graduation event")
 
@@ -202,7 +196,6 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	tokenField := zap.String("tokenAddress", tokenAddress)
 	appLogger.Debug("Extracted token address.", tokenField)
 
-	// Debounce Check
 	tokenCache.Lock()
 	if _, exists := tokenCache.Tokens[tokenAddress]; exists {
 		tokenCache.Unlock()
@@ -213,7 +206,6 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	tokenCache.Unlock()
 	appLogger.Info("Added token to debounce cache.", tokenField)
 
-	// DexScreener Validation
 	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger)
 	if validationErr != nil {
 		appLogger.Error("Error checking DexScreener criteria.", tokenField, zap.Error(validationErr))
@@ -234,7 +226,6 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 	appLogger.Info("Graduated token passed validation! Preparing notification...", tokenField)
 
-	// Build Criteria & Socials Sections
 	criteriaDetails := fmt.Sprintf("🩸 Liquidity: $%.0f\n🏛️ Market Cap: $%.0f\n⌛ (5m) Volume : $%.0f\n⏳ (1h) Volume : $%.0f\n🔎 (5m) TXNs : %d\n🔍 (1h) TXNs : %d", validationResult.LiquidityUSD, validationResult.MarketCap, validationResult.Volume5m, validationResult.Volume1h, validationResult.Txns5m, validationResult.Txns1h)
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
@@ -270,7 +261,6 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	}
 	socialsSectionRaw = strings.TrimRight(socialsSectionRaw, "\n")
 
-	// Helius Image Fetch Logic
 	appLogger.Debug("Attempting Helius GetAsset.", tokenField)
 	heliusImageURL, heliusErr := GetHeliusTokenImageURL(tokenAddress, appLogger)
 	finalImageURL := validationResult.ImageURL
@@ -297,52 +287,45 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Debug("No image URL, sending text.", tokenField)
 	}
 
-	// Construct Dexscreener URL
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
-	// --- Assemble the RAW caption string (NO trading links here) ---
 	var captionBuilder strings.Builder
 
 	captionBuilder.WriteString(fmt.Sprintf("🚨Name: %s\n", validationResult.TokenName))
 	captionBuilder.WriteString(fmt.Sprintf("🎯Symbol: $%s\n\n", validationResult.TokenSymbol))
-	captionBuilder.WriteString(fmt.Sprintf("📃CA: `%s`\n\n", tokenAddress))             // Literal backticks for copy-paste
-	captionBuilder.WriteString(fmt.Sprintf("📊 [DexScreener](%s)\n\n", dexscreenerURL)) // Raw Markdown link
-	captionBuilder.WriteString("---\n")                                                // Raw separator
-	captionBuilder.WriteString(fmt.Sprintf("%s\n", criteriaDetails))                   // Raw criteria
+	captionBuilder.WriteString(fmt.Sprintf("📃CA: `%s`\n\n", tokenAddress))
+	captionBuilder.WriteString(fmt.Sprintf("📊 [DexScreener](%s)\n\n", dexscreenerURL))
+	captionBuilder.WriteString("---\n")
+	captionBuilder.WriteString(fmt.Sprintf("%s\n", criteriaDetails))
 
 	if socialsSectionRaw != "" {
 		captionBuilder.WriteString("\n")
-		captionBuilder.WriteString(socialsSectionRaw) // Append raw socials section
+		captionBuilder.WriteString(socialsSectionRaw)
 		captionBuilder.WriteString("\n")
 	}
-	// Get the final raw string for caption *without* trading links
+
 	rawCaptionToSend := strings.TrimRight(captionBuilder.String(), "\n")
 
-	// --- Construct Trading URLs and Button Map ---
 	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress)
 	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)
 
-	// Create the map for buttons
 	buttons := map[string]string{
 		"🚀 Axiom":    axiomURL,
 		"🧪 Pump.fun": pumpFunURL,
 	}
 
-	// --- Send Notification WITH Buttons ---
-	// Pass the raw caption and the button map. notifications.go handles escaping internally.
 	if usePhoto {
-		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaptionToSend, buttons) // Pass buttons map
+		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaptionToSend, buttons)
 		imageSource := "DexScreener"
 		if heliusErr == nil && heliusImageURL != "" && finalImageURL == heliusImageURL {
 			imageSource = "Helius"
 		}
 		appLogger.Info("Telegram 'Bot Call' photo initiated (with buttons)", tokenField, zap.String("name", validationResult.TokenName), zap.String("imageSource", imageSource))
 	} else {
-		notifications.SendBotCallMessage(rawCaptionToSend, buttons) // Pass buttons map
+		notifications.SendBotCallMessage(rawCaptionToSend, buttons)
 		appLogger.Info("Telegram 'Bot Call' text initiated (with buttons)", tokenField, zap.String("name", validationResult.TokenName))
 	}
 
-	// Update Caches and Tracking
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
@@ -366,7 +349,6 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	return nil
 }
 
-// --- Token Progress Tracking ---
 func CheckTokenProgress(appLogger *logger.Logger) {
 	checkInterval := 2 * time.Minute
 	appLogger.Info("Token progress tracking routine started", zap.Duration("interval", checkInterval), zap.String("notificationTrigger", "Every integer multiple (2x, 3x, 4x...) of initial MC based on ATH seen"))
@@ -432,7 +414,6 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 				if athNotifyLevel > lastNotifiedLevel && athNotifyLevel >= 2 {
 					appLogger.Info("Token hit new notification level...", tokenField, mcBaselineField, zap.Float64("highestMC", highestMCSeen), notifyLevelField, lastLevelField)
 
-					// *** FIX: Construct the DexScreener Link here ***
 					dexScreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
 					tokenNameStr := currentValidationResult.TokenName
@@ -440,8 +421,6 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 						tokenNameStr = tokenAddress
 					}
 
-					// *** FIX: Format the message correctly using the link ***
-					// Let notifications package handle escaping for the tracking message
 					progressMessage := fmt.Sprintf(
 						"🚀 *Token Progress Alert*\n\n"+
 							"📛 *Name:* %s\n"+
@@ -494,6 +473,4 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 	}
 }
 
-// Removed redundant escapeMarkdownV2 helper from this file
-
-// Assume CheckExistingHeliusWebhook and GetHeliusTokenImageURL functions exist in solana.go
+// Assume CheckExistingHeliusWebhook and GetHeliusTokenImageURL functions exist elsewhere
