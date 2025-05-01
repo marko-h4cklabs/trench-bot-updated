@@ -312,9 +312,10 @@ func SendBotCallMessage(message string, buttons ...map[string]string) { // Use v
 		var row []telego.InlineKeyboardButton
 		// Assume only one map is passed, put all its buttons on one row
 		for label, url := range buttons[0] {
-			btn := telegoutil.InlineKeyboardButton(url).WithText(label) // URL button
+			btn := telegoutil.InlineKeyboardButton(label).WithURL(url) // ✅ correct
 			row = append(row, btn)
 		}
+
 		if len(row) > 0 {
 			rows = append(rows, row)
 			replyMarkup = &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
