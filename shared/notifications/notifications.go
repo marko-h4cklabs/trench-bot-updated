@@ -1,5 +1,3 @@
-// FILE: agent/shared/notifications/notifications.go
-
 package notifications
 
 import (
@@ -35,9 +33,8 @@ const (
 	maxRetryWait              = 60 * time.Second
 )
 
-// InitTelegramBot unchanged...
+// InitTelegramBot initializes the Telegram bot and rate limiter.
 func InitTelegramBot() error {
-	// ... (same as previous correct version) ...
 	initMutex.Lock()
 	defer initMutex.Unlock()
 	if isInitialized {
@@ -90,7 +87,7 @@ func InitTelegramBot() error {
 	return nil
 }
 
-// GetBotInstance unchanged...
+// GetBotInstance returns the initialized bot instance or nil.
 func GetBotInstance() *telego.Bot {
 	initMutex.Lock()
 	defer initMutex.Unlock()
@@ -98,18 +95,18 @@ func GetBotInstance() *telego.Bot {
 }
 
 // EscapeMarkdownV2 escapes characters for Telegram MarkdownV2 parse mode.
-// --- CORRECTED VERSION: Preserves backticks ` ` ---
-// This function WILL be called by graduate.go now.
+// --- FINAL CORRECTED VERSION: Preserves backticks ` ` but escapes other needed chars like . - ! etc. ---
 func EscapeMarkdownV2(s string) string {
-	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~" /*"`",*/, ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Backtick removed, hyphen/dot/etc included
+	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~" /*"`",*/, ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"} // Backtick removed, hyphen included
 	var builder strings.Builder
-	builder.Grow(len(s) + 20)
+	builder.Grow(len(s) + 20) // Preallocate buffer
 	for _, r := range s {
 		char := string(r)
 		shouldEscape := false
-		if char == "`" {
+		if char == "`" { // Do NOT escape backticks
 			shouldEscape = false
-		} else { // Do NOT escape backticks
+		} else {
+			// Check if other characters need escaping
 			for _, esc := range charsToEscape {
 				if char == esc {
 					shouldEscape = true
@@ -126,7 +123,7 @@ func EscapeMarkdownV2(s string) string {
 }
 
 // coreSendMessageWithRetry handles the sending logic with rate limiting and retries.
-// --- CORRECTED VERSION: Removed internal escaping ---
+// --- FINAL CORRECTED VERSION: Applies EscapeMarkdownV2 internally ---
 func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaption string, isPhoto bool, photoURL string) error {
 	localBot := GetBotInstance()
 	if localBot == nil {
@@ -134,10 +131,8 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		return errors.New("telego bot not initialized")
 	}
 
-	// === FIX: REMOVE the internal escaping call ===
-	// Send the already formatted/escaped string received from the caller (graduate.go)
-	textOrCaptionToSend := rawTextOrCaption
-	// ============================================
+	// Apply the corrected escaping function (preserves backticks, escapes others)
+	escapedTextOrCaption := EscapeMarkdownV2(rawTextOrCaption)
 
 	var lastErr error
 	logCtx := fmt.Sprintf("[ChatID: %d]", chatID)
@@ -169,11 +164,11 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		var sentMsg *telego.Message
 
 		if isPhoto {
-			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: textOrCaptionToSend, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send UNESCAPED textOrCaptionToSend
+			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send ESCAPED version
 			log.Printf("DEBUG: Attempting SendPhoto %s (Attempt %d/%d)", logCtx, attempt+1, maxRetries)
 			sentMsg, currentErr = localBot.SendPhoto(ctx, params)
 		} else {
-			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: textOrCaptionToSend, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send UNESCAPED textOrCaptionToSend
+			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID} // Send ESCAPED version
 			log.Printf("DEBUG: Attempting SendMessage %s (Attempt %d/%d)", logCtx, attempt+1, maxRetries)
 			sentMsg, currentErr = localBot.SendMessage(ctx, params)
 		}
@@ -185,7 +180,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 			return nil
 		}
 
-		// Error Handling & Retry Logic (robust version - unchanged from last provided)
+		// Error Handling & Retry Logic
 		lastErr = currentErr
 		shouldRetry := false
 		specificRetryAfter := 0
@@ -199,7 +194,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 					log.Printf("INFO: Rate limit hit, retry after %d s %s", specificRetryAfter, logCtx)
 				} else if apiErr.ErrorCode == 400 {
 					if strings.Contains(apiErr.Description, "can't parse entities") {
-						log.Printf("ERROR: MarkdownV2 parsing error: %s. Aborting retries. Check caller escaping. %s", apiErr.Description, logCtx)
+						log.Printf("ERROR: MarkdownV2 parsing error: %s. Aborting retries. Check input text and EscapeMarkdownV2 func. %s", apiErr.Description, logCtx)
 						shouldRetry = false
 					} else {
 						nonRetryableSubstrings := []string{"thread not found", "chat not found", "wrong type of chat", "message text is empty"}
@@ -292,7 +287,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 	return lastErr
 }
 
-// --- Public Send Functions --- (Unchanged from previous correct version)
+// --- Public Send Functions ---
 func SendTelegramMessage(message string) {
 	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "")
 }

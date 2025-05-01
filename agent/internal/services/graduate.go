@@ -1,5 +1,3 @@
-// FILE: agent/internal/services/graduate.go
-
 package services
 
 import (
@@ -7,7 +5,7 @@ import (
 	"ca-scraper/agent/internal/events"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
-	"ca-scraper/shared/notifications" // Will call notifications.EscapeMarkdownV2 implicitly via send funcs
+	"ca-scraper/shared/notifications" // Needed for Send functions and EscapeMarkdownV2
 	"encoding/json"
 	"fmt"
 	"io"
@@ -207,7 +205,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	tokenCache.Lock()
 	if _, exists := tokenCache.Tokens[tokenAddress]; exists {
 		tokenCache.Unlock()
-		appLogger.Info("Token already processed recently (debounce).", tokenField)
+		appLogger.Info("Token already processed (debounce).", tokenField)
 		return nil
 	}
 	tokenCache.Tokens[tokenAddress] = time.Now()
@@ -215,7 +213,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	appLogger.Info("Added token to debounce cache.", tokenField)
 
 	// DexScreener Validation
-	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger) // Assumes correct version
+	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger)
 	if validationErr != nil {
 		appLogger.Error("Error checking DexScreener criteria.", tokenField, zap.Error(validationErr))
 		return validationErr
@@ -225,7 +223,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		if validationResult != nil {
 			if len(validationResult.FailReasons) > 0 {
 				reason = strings.Join(validationResult.FailReasons, "; ")
-			} else if !validationResult.IsValid {
+			} else {
 				reason = "Did not meet criteria"
 			}
 		}
@@ -235,8 +233,10 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 	appLogger.Info("Graduated token passed validation! Preparing notification...", tokenField)
 
-	// Build Criteria & Socials Sections
+	// Build Criteria Details (Plain Text)
 	criteriaDetails := fmt.Sprintf("🩸 Liquidity: $%.0f\n🏛️ Market Cap: $%.0f\n⌛ (5m) Volume : $%.0f\n⏳ (1h) Volume : $%.0f\n🔎 (5m) TXNs : %d\n🔍 (1h) TXNs : %d", validationResult.LiquidityUSD, validationResult.MarketCap, validationResult.Volume5m, validationResult.Volume1h, validationResult.Txns5m, validationResult.Txns1h)
+
+	// Build Socials Section (Plain Text URLs)
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
 	if validationResult.WebsiteURL != "" {
@@ -265,11 +265,11 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 			hasSocials = true
 		}
 	}
-	socialsSection := ""
+	socialsSectionRaw := ""
 	if hasSocials {
-		socialsSection = "---\nSocials\n" + socialLinksBuilder.String()
+		socialsSectionRaw = "---\nSocials\n" + socialLinksBuilder.String()
 	}
-	socialsSection = strings.TrimRight(socialsSection, "\n")
+	socialsSectionRaw = strings.TrimRight(socialsSectionRaw, "\n")
 
 	// Helius Image Fetch Logic
 	appLogger.Debug("Attempting Helius GetAsset.", tokenField)
@@ -304,43 +304,40 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)
 
 	// --- Assemble the ENTIRE RAW caption string ---
-	// Including Markdown links and backticks. Escaping will happen in notifications.go
+	// Let notifications.go handle the escaping just before sending.
 	var captionBuilder strings.Builder
 
 	captionBuilder.WriteString(fmt.Sprintf("🚨Name: %s\n", validationResult.TokenName))
 	captionBuilder.WriteString(fmt.Sprintf("🎯Symbol: $%s\n\n", validationResult.TokenSymbol))
-	captionBuilder.WriteString(fmt.Sprintf("📃CA: `%s`\n\n", tokenAddress)) // Backticks for copy-on-tap
-	// Use Markdown link for Dexscreener
-	captionBuilder.WriteString(fmt.Sprintf("📊 [DexScreener](%s)\n\n", dexscreenerURL))
-	captionBuilder.WriteString("---\n")                              // Separator
-	captionBuilder.WriteString(fmt.Sprintf("%s\n", criteriaDetails)) // Criteria details
+	captionBuilder.WriteString(fmt.Sprintf("📃CA: `%s`\n\n", tokenAddress))             // Literal backticks for copy-paste
+	captionBuilder.WriteString(fmt.Sprintf("📊 [DexScreener](%s)\n\n", dexscreenerURL)) // Raw Markdown link
+	captionBuilder.WriteString("---\n")                                                // Raw separator
+	captionBuilder.WriteString(fmt.Sprintf("%s\n", criteriaDetails))                   // Raw criteria
 
-	// Append socials if they exist
-	if socialsSection != "" {
-		captionBuilder.WriteString("\n") // Add space before socials
-		captionBuilder.WriteString(socialsSection)
-		captionBuilder.WriteString("\n") // Add space after socials
+	if socialsSectionRaw != "" {
+		captionBuilder.WriteString("\n")
+		captionBuilder.WriteString(socialsSectionRaw) // Append raw socials section
+		captionBuilder.WriteString("\n")
 	}
 
-	// Append RAW Trading Links
-	captionBuilder.WriteString("\n---\n") // Separator before trading links
-	// Create raw Markdown links - escaping of pipe/dot in text is optional but safer for V2
+	captionBuilder.WriteString("\n---\n") // Raw separator
+	// Raw Markdown links (escaping pipe/dot in text is optional but safer for V2)
 	captionBuilder.WriteString(fmt.Sprintf("[Axiom](%s) \\| [Pump\\.fun](%s)", axiomURL, pumpFunURL))
 
-	// Get the final raw string
-	rawCaption := captionBuilder.String()
+	// Get the final raw string to send
+	rawCaptionToSend := captionBuilder.String()
 
 	// --- Send Notification ---
-	// Pass the RAW caption. notifications.go will apply EscapeMarkdownV2 (which preserves backticks)
+	// Pass the rawCaptionToSend. notifications.go will apply EscapeMarkdownV2 internally.
 	if usePhoto {
-		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaption)
+		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaptionToSend)
 		imageSource := "DexScreener"
 		if heliusErr == nil && heliusImageURL != "" && finalImageURL == heliusImageURL {
 			imageSource = "Helius"
 		}
 		appLogger.Info("Telegram 'Bot Call' photo initiated", tokenField, zap.String("name", validationResult.TokenName), zap.String("imageSource", imageSource))
 	} else {
-		notifications.SendBotCallMessage(rawCaption)
+		notifications.SendBotCallMessage(rawCaptionToSend)
 		appLogger.Info("Telegram 'Bot Call' text initiated", tokenField, zap.String("name", validationResult.TokenName))
 	}
 
@@ -438,8 +435,8 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 					if tokenNameStr == "" {
 						tokenNameStr = tokenAddress
 					}
-					// Use the escape function from notifications package for consistency
-					progressMessage := fmt.Sprintf("🚀 Token Progress: *%s*\n\nHit: *%dx*\n\nInitial MC: `$%.0f`\nATH MC: `$%.0f`\n\n📊 [DexScreener](%s)", notifications.EscapeMarkdownV2(tokenNameStr), athNotifyLevel, baselineMarketCap, highestMCSeen, dexScreenerLinkRaw)
+					// Pass raw string to notification function, let it handle escaping
+					progressMessage := fmt.Sprintf("🚀 Token Progress: *%s*\n\nHit: *%dx*\n\nInitial MC: `$%.0f`\nATH MC: `$%.0f`\n\n📊 [DexScreener](%s)", tokenNameStr, athNotifyLevel, baselineMarketCap, highestMCSeen, dexScreenerLinkRaw)
 					notifications.SendTrackingUpdateMessage(progressMessage)
 					appLogger.Info("Sent ATH tracking update notification.", tokenField, notifyLevelField)
 					infoToUpdate := trackedInfo
@@ -478,17 +475,6 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 	}
 }
 
-// --- Markdown Escaping Helper ---
-// Can be removed if not used elsewhere in this file.
-func escapeMarkdownV2(text string) string {
-	// This is now redundant if notifications.EscapeMarkdownV2 is used correctly
-	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
-	replacerArgs := make([]string, 0, len(escapeChars)*2)
-	for _, char := range escapeChars {
-		replacerArgs = append(replacerArgs, char, "\\"+char)
-	}
-	r := strings.NewReplacer(replacerArgs...)
-	return r.Replace(text)
-}
+// Removed redundant escapeMarkdownV2 helper from this file
 
 // Assume CheckExistingHeliusWebhook and GetHeliusTokenImageURL functions exist in solana.go
