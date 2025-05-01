@@ -59,7 +59,6 @@ const (
 )
 
 // --- Webhook Setup ---
-// SetupGraduationWebhook remains exactly as you provided it
 func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	appLogger.Info("Setting up Graduation Webhook...", zap.String("url", webhookURL))
 	apiKey := env.HeliusAPIKey
@@ -162,8 +161,6 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 }
 
 // --- Webhook Handling ---
-
-// HandleWebhook remains exactly as you provided it
 func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
 	appLogger.Debug("Received Graduation Webhook Payload", zap.Int("size", len(payload)))
 	if len(payload) == 0 {
@@ -193,8 +190,6 @@ func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
 }
 
 // --- Token Processing and Notification ---
-
-// processGraduatedToken modified to handle escaping and link formatting correctly
 func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) error {
 	appLogger.Debug("Processing single graduation event")
 
@@ -206,7 +201,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	tokenField := zap.String("tokenAddress", tokenAddress)
 	appLogger.Debug("Extracted token address.", tokenField)
 
-	// Debounce Check (Unchanged)
+	// Debounce Check
 	tokenCache.Lock()
 	if _, exists := tokenCache.Tokens[tokenAddress]; exists {
 		tokenCache.Unlock()
@@ -217,8 +212,8 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	tokenCache.Unlock()
 	appLogger.Info("Added token to debounce cache.", tokenField)
 
-	// DexScreener Validation (Unchanged Assumption: uses Name/Symbol, No Max Liq/Vol/Tx)
-	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger)
+	// DexScreener Validation
+	validationResult, validationErr := IsTokenValid(tokenAddress, appLogger) // Assumes correct version
 	if validationErr != nil {
 		appLogger.Error("Error checking DexScreener criteria.", tokenField, zap.Error(validationErr))
 		return validationErr
@@ -238,7 +233,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 	appLogger.Info("Graduated token passed validation! Preparing notification...", tokenField)
 
-	// Build Criteria & Socials Sections (Unchanged)
+	// Build Criteria & Socials Sections
 	criteriaDetails := fmt.Sprintf("🩸 Liquidity: $%.0f\n🏛️ Market Cap: $%.0f\n⌛ (5m) Volume : $%.0f\n⏳ (1h) Volume : $%.0f\n🔎 (5m) TXNs : %d\n🔍 (1h) TXNs : %d", validationResult.LiquidityUSD, validationResult.MarketCap, validationResult.Volume5m, validationResult.Volume1h, validationResult.Txns5m, validationResult.Txns1h)
 	var socialLinksBuilder strings.Builder
 	hasSocials := false
@@ -274,7 +269,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	}
 	socialsSection = strings.TrimRight(socialsSection, "\n")
 
-	// Helius Image Fetch Logic (Unchanged)
+	// Helius Image Fetch Logic
 	appLogger.Debug("Attempting Helius GetAsset.", tokenField)
 	heliusImageURL, heliusErr := GetHeliusTokenImageURL(tokenAddress, appLogger)
 	finalImageURL := validationResult.ImageURL
@@ -301,66 +296,63 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Debug("No image URL, sending text.", tokenField)
 	}
 
-	// Construct Dexscreener URL (needed for main caption part)
+	// Construct Dexscreener URL
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
-	// --- Assemble Main Caption PART 1 (Info + Dexscreener Link + Criteria + Socials) ---
-	// Build the part that NEEDS escaping first.
-	// Dexscreener URL is included here so '.' gets escaped.
-	// CA with backticks is included here; notifications.EscapeMarkdownV2 must preserve backticks.
+	// Assemble Main Caption PART 1 (Info + Dexscreener Link + Criteria + Socials)
 	mainCaptionPart := fmt.Sprintf(
 		"🚨Name: %s\n"+
 			"🎯Symbol: $%s\n\n"+
 			"📃CA: `%s`\n\n"+ // Backticks for copy-on-tap
-			"📊 DexScreener: %s\n\n"+ // Dexscreener URL needs escaping
+			"📊 DexScreener: %s\n\n"+ // Dexscreener URL (will be escaped)
 			"--- Criteria Met ---\n"+
 			"%s", // criteriaDetails
 		validationResult.TokenName,
 		validationResult.TokenSymbol,
 		tokenAddress,
-		dexscreenerURL, // URL to be escaped
+		dexscreenerURL,
 		criteriaDetails,
 	)
 	if socialsSection != "" {
 		mainCaptionPart += "\n\n" + socialsSection
 	}
 
-	// --- Escape *only* the main part ---
-	// Call the function from the notifications package (assumed to preserve backticks)
+	// Escape *only* the main part (this function MUST preserve backticks)
 	escapedMainCaption := notifications.EscapeMarkdownV2(mainCaptionPart)
 
-	// --- Construct Trading URLs and RAW Link String ---
+	// Construct Trading URLs and RAW Link String
 	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress)
 	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)
 
 	// Create the RAW Markdown string for links - DO NOT ESCAPE THIS PART
+	// Escape the pipe | and the dot . within the link TEXT only for V2
 	tradingLinksRaw := fmt.Sprintf(
-		"[Axiom](%s) \\| [Pump\\.fun](%s)", // Use escaped pipe | and dot . in link text
+		"[Axiom](%s) \\| [Pump\\.fun](%s)",
 		axiomURL,
 		pumpFunURL,
 	)
 
-	// --- Combine Escaped Main Caption + Raw Trading Links ---
+	// Combine Escaped Main Caption + Raw Trading Links
 	finalCaption := escapedMainCaption // Start with the escaped part
-
 	// Add separator and RAW links
 	finalCaption += "\n\n---\n" + tradingLinksRaw // Append trading links
 
-	// --- Send Notification ---
-	// Send the combined finalCaption. notifications.go MUST use ParseMode=MarkdownV2
+	// Send Notification
+	// Pass the final, carefully constructed caption to the notification functions.
+	// These functions MUST send with ParseMode=MarkdownV2 and NOT apply further escaping.
 	if usePhoto {
-		notifications.SendBotCallPhotoMessage(finalImageURL, finalCaption) // Send finalCaption
+		notifications.SendBotCallPhotoMessage(finalImageURL, finalCaption)
 		imageSource := "DexScreener"
 		if heliusErr == nil && heliusImageURL != "" && finalImageURL == heliusImageURL {
 			imageSource = "Helius"
 		}
 		appLogger.Info("Telegram 'Bot Call' photo initiated", tokenField, zap.String("name", validationResult.TokenName), zap.String("imageSource", imageSource))
 	} else {
-		notifications.SendBotCallMessage(finalCaption) // Send finalCaption
+		notifications.SendBotCallMessage(finalCaption)
 		appLogger.Info("Telegram 'Bot Call' text initiated", tokenField, zap.String("name", validationResult.TokenName))
 	}
 
-	// Update Caches and Tracking (Unchanged)
+	// Update Caches and Tracking
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddress] = time.Now()
 	graduatedTokenCache.Unlock()
@@ -381,12 +373,10 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Info("Token not added to progress tracking (MC=0).", tokenField)
 	}
 
-	return nil // Success
+	return nil
 }
 
 // --- Token Progress Tracking ---
-
-// CheckTokenProgress remains exactly as you provided it
 func CheckTokenProgress(appLogger *logger.Logger) {
 	checkInterval := 2 * time.Minute
 	appLogger.Info("Token progress tracking routine started", zap.Duration("interval", checkInterval), zap.String("notificationTrigger", "Every integer multiple (2x, 3x, 4x...) of initial MC based on ATH seen"))
@@ -456,7 +446,7 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 					if tokenNameStr == "" {
 						tokenNameStr = tokenAddress
 					}
-					progressMessage := fmt.Sprintf("🚀 Token Progress: *%s*\n\nHit: *%dx*\n\nInitial MC: `$%.0f`\nATH MC: `$%.0f`\n\nDexScreener: %s", escapeMarkdownV2(tokenNameStr), athNotifyLevel, baselineMarketCap, highestMCSeen, dexScreenerLinkRaw)
+					progressMessage := fmt.Sprintf("🚀 Token Progress: *%s*\n\nHit: *%dx*\n\nInitial MC: `$%.0f`\nATH MC: `$%.0f`\n\n📊 [DexScreener](%s)", escapeMarkdownV2(tokenNameStr), athNotifyLevel, baselineMarketCap, highestMCSeen, dexScreenerLinkRaw) // Using escape helper from this file
 					notifications.SendTrackingUpdateMessage(progressMessage)
 					appLogger.Info("Sent ATH tracking update notification.", tokenField, notifyLevelField)
 					infoToUpdate := trackedInfo
@@ -496,8 +486,8 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 }
 
 // --- Markdown Escaping Helper ---
-// Note: This local helper is likely unused if escaping happens in notifications.go
-// Ensure the one in notifications.go is correct (preserves backticks).
+// Note: This local helper is likely unused if escaping happens correctly in notifications.go
+// It's crucial that the one in notifications.go preserves backticks.
 func escapeMarkdownV2(text string) string {
 	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	replacerArgs := make([]string, 0, len(escapeChars)*2)
