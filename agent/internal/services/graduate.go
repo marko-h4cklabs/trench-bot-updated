@@ -55,14 +55,13 @@ var graduatedTokenCache = &GraduatedTokenCache{Data: make(map[string]time.Time)}
 
 // --- Constants ---
 const (
-	solAddress = "So11111111111111111111111111111111111111112" // Wrapped SOL address for Axiom link (if needed, not used in this version)
+	solAddress = "So11111111111111111111111111111111111111112"
 )
 
 // --- Webhook Setup ---
-
 // SetupGraduationWebhook remains exactly as you provided it
 func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
-	// ... (Implementation unchanged from your provided code) ...
+	// ... (Implementation unchanged) ...
 	appLogger.Info("Setting up Graduation Webhook...", zap.String("url", webhookURL))
 	apiKey := env.HeliusAPIKey
 	webhookSecret := env.WebhookSecret
@@ -88,7 +87,7 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 	}
 	if authHeader == "" {
 		appLogger.Warn("HELIUS_AUTH_HEADER is not set (this is often optional).")
-	} // Changed from Info to Warn
+	}
 	addressesToMonitor := []string{}
 	if pumpFunAuthority != "" {
 		addressesToMonitor = append(addressesToMonitor, pumpFunAuthority)
@@ -167,7 +166,7 @@ func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
 
 // HandleWebhook remains exactly as you provided it
 func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
-	// ... (Implementation unchanged from your provided code) ...
+	// ... (Implementation unchanged) ...
 	appLogger.Debug("Received Graduation Webhook Payload", zap.Int("size", len(payload)))
 	if len(payload) == 0 {
 		appLogger.Error("Empty graduation webhook payload received!")
@@ -197,7 +196,7 @@ func HandleWebhook(payload []byte, appLogger *logger.Logger) error {
 
 // --- Token Processing and Notification ---
 
-// processGraduatedToken modified minimally to add trading links at the end
+// processGraduatedToken modified to handle escaping and link formatting correctly
 func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) error {
 	appLogger.Debug("Processing single graduation event")
 
@@ -307,13 +306,13 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	// Construct Dexscreener URL (needed for main caption part)
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
 
-	// --- Assemble Main Caption PART 1 (Info + Criteria)---
-	// This remains as you provided it
-	caption := fmt.Sprintf(
+	// --- Assemble Main Caption PART 1 (Info + Criteria + Socials) ---
+	// IMPORTANT: Build the part that NEEDS escaping first.
+	mainCaptionPart := fmt.Sprintf(
 		"🚨Name: %s\n"+
 			"🎯Symbol: $%s\n\n"+
 			"📃CA: `%s`\n\n"+ // Backticks for copy-on-tap
-			"DexScreener: %s\n\n"+
+			"DexScreener: %s\n\n"+ // Dexscreener URL needs escaping if it contains '.' etc.
 			"--- Criteria Met ---\n"+
 			"%s", // criteriaDetails
 		validationResult.TokenName,
@@ -322,44 +321,49 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		dexscreenerURL,
 		criteriaDetails,
 	)
-
-	// Append socials (Unchanged)
 	if socialsSection != "" {
-		caption += "\n\n" + socialsSection
+		mainCaptionPart += "\n\n" + socialsSection
 	}
 
-	// *** MODIFICATION START: Construct Trading URLs and Link String ***
-	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress) // Corrected URL
-	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)    // Corrected URL (http)
+	// *** MODIFICATION START: Escape *only* the main part ***
+	// Use the EscapeMarkdownV2 function from notifications package (which should preserve backticks)
+	escapedMainCaption := notifications.EscapeMarkdownV2(mainCaptionPart)
+	// *** MODIFICATION END ***
 
-	// Create the inline "button" string - Ensure ParseMode handles this correctly
-	tradingLinks := fmt.Sprintf(
+	// *** MODIFICATION START: Construct Trading URLs and RAW Link String ***
+	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress)
+	axiomURL := fmt.Sprintf("http://axiom.trade/t/%s", tokenAddress)
+
+	// Create the RAW Markdown string for links - DO NOT ESCAPE THIS PART
+	tradingLinksRaw := fmt.Sprintf(
 		"[Axiom](%s) | [Pump.fun](%s)", // Short text links
 		axiomURL,
 		pumpFunURL,
 	)
 	// *** MODIFICATION END ***
 
-	// *** MODIFICATION START: Append Trading Links to Caption ***
-	// Add a separator if social links were present, or just space otherwise
+	// *** MODIFICATION START: Combine Escaped Main Caption + Raw Trading Links ***
+	finalCaption := escapedMainCaption // Start with the escaped part
+
+	// Add separator and links
 	if socialsSection != "" {
-		caption += "\n\n---\n" + tradingLinks // Separator line if socials exist
+		finalCaption += "\n\n---\n" + tradingLinksRaw // Separator line if socials exist
 	} else {
-		caption += "\n\n" + tradingLinks // Just spacing if no socials
+		finalCaption += "\n\n" + tradingLinksRaw // Just spacing if no socials
 	}
 	// *** MODIFICATION END ***
 
 	// --- Send Notification ---
-	// Assumes notifications.go uses MarkdownV2 and EscapeMarkdownV2 preserves backticks ` ` but escapes []() correctly
+	// Send the combined finalCaption. notifications.go MUST use ParseMode=MarkdownV2
 	if usePhoto {
-		notifications.SendBotCallPhotoMessage(finalImageURL, caption)
+		notifications.SendBotCallPhotoMessage(finalImageURL, finalCaption) // Send finalCaption
 		imageSource := "DexScreener"
 		if heliusErr == nil && heliusImageURL != "" && finalImageURL == heliusImageURL {
 			imageSource = "Helius"
 		}
 		appLogger.Info("Telegram 'Bot Call' photo initiated", tokenField, zap.String("name", validationResult.TokenName), zap.String("imageSource", imageSource))
 	} else {
-		notifications.SendBotCallMessage(caption)
+		notifications.SendBotCallMessage(finalCaption) // Send finalCaption
 		appLogger.Info("Telegram 'Bot Call' text initiated", tokenField, zap.String("name", validationResult.TokenName))
 	}
 
@@ -391,7 +395,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 // CheckTokenProgress remains exactly as you provided it
 func CheckTokenProgress(appLogger *logger.Logger) {
-	// ... (Implementation unchanged from your provided code) ...
+	// ... (Implementation unchanged) ...
 	checkInterval := 2 * time.Minute
 	appLogger.Info("Token progress tracking routine started", zap.Duration("interval", checkInterval), zap.String("notificationTrigger", "Every integer multiple (2x, 3x, 4x...) of initial MC based on ATH seen"))
 	ticker := time.NewTicker(checkInterval)
@@ -501,12 +505,11 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 
 // --- Markdown Escaping Helper ---
 
-// escapeMarkdownV2 helper function (version that preserves backticks needed)
-// Make sure the version in notifications.go is the one that DOES NOT escape backticks `
-// This helper might be used elsewhere, so keeping it consistent or removing if unused.
-// **NOTE:** The version pasted by the user DOES escape backticks. This needs to be corrected in notifications.go
-// For this file, I'll keep the user's provided version, assuming notifications.go has the correct one.
+// escapeMarkdownV2 helper function used by CheckTokenProgress
+// NOTE: Ensure the version in notifications.go is the one that PRESERVES backticks `
 func escapeMarkdownV2(text string) string {
+	// This version (from user input) escapes backticks, which might be fine for CheckTokenProgress message
+	// but is INCORRECT for the main message if copy-paste CA is desired.
 	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	replacerArgs := make([]string, 0, len(escapeChars)*2)
 	for _, char := range escapeChars {
