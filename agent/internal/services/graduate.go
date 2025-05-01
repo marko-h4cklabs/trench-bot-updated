@@ -430,7 +430,7 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 				notifyLevelField := zap.Int("athNotifyLevel", athNotifyLevel)
 				appLogger.Debug("Progress calculation", tokenField, mcBaselineField, mcCurrentField, zap.Float64("highestMCRecorded", highestMCSeen), multiplierField, notifyLevelField, lastLevelField)
 				if athNotifyLevel > lastNotifiedLevel && athNotifyLevel >= 2 {
-					appLogger.Info("Token hit new notification level.", tokenField, mcBaselineField, zap.Float64("highestMC", highestMCSeen), notifyLevelField, lastLevelField)
+					appLogger.Info("Token hit new notification level...", tokenField, mcBaselineField, zap.Float64("highestMC", highestMCSeen), notifyLevelField, lastLevelField)
 
 					// *** FIX: Construct the DexScreener Link here ***
 					dexScreenerLink := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddress)
