@@ -1,3 +1,5 @@
+// FILE: agent/internal/services/graduate.go
+
 package services
 
 import (
@@ -308,7 +310,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	captionBuilder.WriteString(fmt.Sprintf("🚨Name: %s\n", validationResult.TokenName))
 	captionBuilder.WriteString(fmt.Sprintf("🎯Symbol: $%s\n\n", validationResult.TokenSymbol))
 	captionBuilder.WriteString(fmt.Sprintf("📃CA: `%s`\n\n", tokenAddress)) // Backticks for copy-on-tap
-	// Use Markdown link for Dexscreener here as well
+	// Use Markdown link for Dexscreener
 	captionBuilder.WriteString(fmt.Sprintf("📊 [DexScreener](%s)\n\n", dexscreenerURL))
 	captionBuilder.WriteString("---\n")                              // Separator
 	captionBuilder.WriteString(fmt.Sprintf("%s\n", criteriaDetails)) // Criteria details
@@ -322,7 +324,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 	// Append RAW Trading Links
 	captionBuilder.WriteString("\n---\n") // Separator before trading links
-	// Use raw Markdown links. Escaped pipe/dot in text is optional but safer for V2.
+	// Create raw Markdown links - escaping of pipe/dot in text is optional but safer for V2
 	captionBuilder.WriteString(fmt.Sprintf("[Axiom](%s) \\| [Pump\\.fun](%s)", axiomURL, pumpFunURL))
 
 	// Get the final raw string
@@ -436,7 +438,7 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 					if tokenNameStr == "" {
 						tokenNameStr = tokenAddress
 					}
-					// Use the correct escape function (assuming it's in notifications pkg)
+					// Use the escape function from notifications package for consistency
 					progressMessage := fmt.Sprintf("🚀 Token Progress: *%s*\n\nHit: *%dx*\n\nInitial MC: `$%.0f`\nATH MC: `$%.0f`\n\n📊 [DexScreener](%s)", notifications.EscapeMarkdownV2(tokenNameStr), athNotifyLevel, baselineMarketCap, highestMCSeen, dexScreenerLinkRaw)
 					notifications.SendTrackingUpdateMessage(progressMessage)
 					appLogger.Info("Sent ATH tracking update notification.", tokenField, notifyLevelField)
@@ -477,8 +479,9 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 }
 
 // --- Markdown Escaping Helper ---
-// Can likely be removed from this file if notifications.go has the correct one.
+// Can be removed if not used elsewhere in this file.
 func escapeMarkdownV2(text string) string {
+	// This is now redundant if notifications.EscapeMarkdownV2 is used correctly
 	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	replacerArgs := make([]string, 0, len(escapeChars)*2)
 	for _, char := range escapeChars {
