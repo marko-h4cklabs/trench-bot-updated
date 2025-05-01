@@ -346,7 +346,7 @@ func SendVerificationSuccessMessage(userID int64, groupLink string) error {
 	localBot := GetBotInstance()
 	if localBot == nil {
 		log.Printf("ERROR: Bot nil for verification success msg to user %d.", userID)
-		return errors.New("bot instance nil")
+		return errors.New("bot instance nil.")
 	}
 	err := coreSendMessageWithRetry(userID, 0, messageText, false, "")
 	if err != nil {
