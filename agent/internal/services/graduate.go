@@ -322,7 +322,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 
 	captionBuilder.WriteString("\n---\n") // Raw separator
 	// Raw Markdown links (escaping pipe/dot in text is optional but safer for V2)
-	captionBuilder.WriteString(fmt.Sprintf("[Axiom](%s) | [Pump.fun](%s)", axiomURL, pumpFunURL))
+	captionBuilder.WriteString(fmt.Sprintf("[Axiom](%s)\n[Pump.fun](%s)", axiomURL, pumpFunURL))
 
 	// Get the final raw string to send
 	rawCaptionToSend := captionBuilder.String()
