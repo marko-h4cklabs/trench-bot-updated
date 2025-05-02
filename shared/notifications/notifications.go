@@ -370,7 +370,7 @@ func SendVerificationSuccessMessage(userID int64, groupLink string) error {
 		return errors.New("target group link empty")
 	}
 	escapedGroupLink := groupLink
-	messageText := fmt.Sprintf("✅ Verification Successful\\! You now have access\\.\n\nJoin the group here: [Click to Join](%s)", escapedGroupLink)
+	messageText := fmt.Sprintf("✅ Verification Successful! You now have access.\n\nJoin the group here: [Click to Join](%s)", escapedGroupLink)
 	localBot := GetBotInstance()
 	if localBot == nil {
 		log.Printf("ERROR: Bot nil for verification success msg to user %d.", userID)
