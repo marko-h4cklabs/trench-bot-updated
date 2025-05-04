@@ -142,7 +142,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 		err := dexScreenerLimiter.Wait(waitCtx)
 		cancel()
 		if err != nil {
-			appLogger.Error("DexScreener internal rate limiter wait error", tokenField, zap.Error(err))
+			appLogger.Error("DexScreener internal rate limiter wait error...", tokenField, zap.Error(err))
 			return nil, fmt.Errorf("internal rate limiter error for %s: %w", tokenCA, err)
 		}
 
