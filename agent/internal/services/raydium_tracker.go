@@ -47,7 +47,7 @@ func TrackGraduatedToken(tokenAddress string, appLogger *logger.Logger) {
 }
 
 const (
-	validationVolumeThreshold = 300.0
+	validationVolumeThreshold = 500.0
 	validationCheckInterval   = 2 * time.Minute
 	swapCacheMaxRetention     = 30 * time.Minute
 	swapCacheCleanupInterval  = 5 * time.Minute
