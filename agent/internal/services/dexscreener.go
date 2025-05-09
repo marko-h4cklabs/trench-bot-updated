@@ -55,6 +55,10 @@ const (
 	// Filter E: High Liquidity Sanity Check
 	HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK = 100000.0 // Apply this check if Liq > $100k
 	MIN_MC_TO_HIGH_LIQ_RATIO              = 1.15     // MC must be at least 115% of Liq if Liq is high
+
+	// --- NEW: Filter G Constants (Buy/Sell Imbalance) ---
+	MIN_TX_FOR_BS_RATIO_CHECK    = 50   // Minimum total transactions in the period to perform B/S ratio check
+	BS_RATIO_IMBALANCE_THRESHOLD = 0.85 // Flag if >85% are buys OR >85% are sells
 )
 
 var (
@@ -67,11 +71,11 @@ type Pair struct {
 	DexID         string             `json:"dexId"`
 	URL           string             `json:"url"`
 	PairAddress   string             `json:"pairAddress"`
-	BaseToken     Token              `json:"baseToken"` // Contains Name and Symbol
+	BaseToken     Token              `json:"baseToken"`
 	QuoteToken    Token              `json:"quoteToken"`
 	PriceNative   string             `json:"priceNative"`
 	PriceUsd      string             `json:"priceUsd"`
-	Transactions  map[string]TxData  `json:"txns"`
+	Transactions  map[string]TxData  `json:"txns"` // Contains Buys and Sells
 	Volume        map[string]float64 `json:"volume"`
 	PriceChange   map[string]float64 `json:"priceChange"`
 	Liquidity     *Liquidity         `json:"liquidity"`
@@ -111,12 +115,11 @@ type Liquidity struct {
 	Quote float64 `json:"quote"`
 }
 
-type TxData struct {
+type TxData struct { // This struct from DexScreener contains Buys and Sells
 	Buys  int `json:"buys"`
 	Sells int `json:"sells"`
 }
 
-// Includes TokenName and TokenSymbol fields from previous request
 type ValidationResult struct {
 	IsValid                bool
 	PairAddress            string
@@ -126,8 +129,12 @@ type ValidationResult struct {
 	MarketCap              float64
 	Volume5m               float64
 	Volume1h               float64
-	Txns5m                 int
-	Txns1h                 int
+	Txns5m                 int // Total 5m transactions (buys + sells)
+	Txns1h                 int // Total 1h transactions (buys + sells)
+	Txns5mBuys             int // Specific 5m buys
+	Txns5mSells            int // Specific 5m sells
+	Txns1hBuys             int // Specific 1h buys
+	Txns1hSells            int // Specific 1h sells
 	FailReasons            []string
 	WebsiteURL             string
 	TwitterURL             string
@@ -165,7 +172,6 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 		}
 
 		appLogger.Debug("Checking DexScreener validity", attemptField, tokenField)
-		// Renamed 'url' to 'urlAPI' to avoid conflict with 'url' package if imported locally
 		urlAPI := fmt.Sprintf("%s/%s", dexScreenerAPI, tokenCA)
 		client := &http.Client{Timeout: 10 * time.Second}
 		req, _ := http.NewRequestWithContext(context.Background(), "GET", urlAPI, nil)
@@ -221,12 +227,18 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			if vol1h, ok := pair.Volume["h1"]; ok {
 				result.Volume1h = vol1h
 			}
-			if txns5m, ok := pair.Transactions["m5"]; ok {
-				result.Txns5m = txns5m.Buys + txns5m.Sells
+			// Populate Buy/Sell counts
+			if txData5m, ok := pair.Transactions["m5"]; ok {
+				result.Txns5mBuys = txData5m.Buys
+				result.Txns5mSells = txData5m.Sells
+				result.Txns5m = txData5m.Buys + txData5m.Sells
 			}
-			if txns1h, ok := pair.Transactions["h1"]; ok {
-				result.Txns1h = txns1h.Buys + txns1h.Sells
+			if txData1h, ok := pair.Transactions["h1"]; ok {
+				result.Txns1hBuys = txData1h.Buys
+				result.Txns1hSells = txData1h.Sells
+				result.Txns1h = txData1h.Buys + txData1h.Sells
 			}
+
 			if pair.Info != nil {
 				result.ImageURL = pair.Info.ImageURL
 				if len(pair.Info.Websites) > 0 {
@@ -246,11 +258,11 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			appLogger.Debug("DexScreener data fetched for validation", tokenField, pairField,
 				zap.Float64("liqUSD", result.LiquidityUSD), zap.Float64("mc", result.MarketCap),
 				zap.Float64("vol5m", result.Volume5m), zap.Float64("vol1h", result.Volume1h),
-				zap.Int("tx5m", result.Txns5m), zap.Int("tx1h", result.Txns1h))
+				zap.Int("tx5mTotal", result.Txns5m), zap.Int("tx5mBuys", result.Txns5mBuys), zap.Int("tx5mSells", result.Txns5mSells),
+				zap.Int("tx1hTotal", result.Txns1h), zap.Int("tx1hBuys", result.Txns1hBuys), zap.Int("tx1hSells", result.Txns1hSells))
 
 			meetsCriteria := true
 
-			// 1. Explicit Early Checks
 			if result.LiquidityUSD <= 0 {
 				meetsCriteria = false
 				result.FailReasons = append(result.FailReasons, "Liquidity is zero or negative")
@@ -264,7 +276,6 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				result.FailReasons = append(result.FailReasons, "5m Volume and 1h Volume are identical and > 0")
 			}
 
-			// 2. Base Min/Max Filters
 			if meetsCriteria {
 				if result.LiquidityUSD < minLiquidity {
 					meetsCriteria = false
@@ -296,9 +307,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				}
 			}
 
-			// 3. Advanced Filters
 			if meetsCriteria {
-				// Filter A: Stagnation Filter
 				volCheckStagnation := result.Volume1h < result.Volume5m*STAGNATION_GROWTH_FACTOR
 				txnCheckStagnation := float64(result.Txns1h) < float64(result.Txns5m)*STAGNATION_GROWTH_FACTOR
 				if volCheckStagnation && txnCheckStagnation {
@@ -308,19 +317,16 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 					}
 				}
 
-				// Filter B: High Initial TXN, Low Growth Filter
 				if meetsCriteria && (result.Txns5m > HIGH_TXN_THRESHOLD) && (float64(result.Txns1h) < float64(result.Txns5m)*HIGH_TXN_LOW_GROWTH_FACTOR) {
 					meetsCriteria = false
 					result.FailReasons = append(result.FailReasons, fmt.Sprintf("High initial TXN with low growth: Tx(5m)>%d AND Tx(1h)<Tx(5m)*%.2f", HIGH_TXN_THRESHOLD, HIGH_TXN_LOW_GROWTH_FACTOR))
 				}
 
-				// Filter C: Moderate Initial TXN, Very Low Growth Filter
 				if meetsCriteria && (result.Txns5m >= MODERATE_TXN_LOWER_BOUND && result.Txns5m <= MODERATE_TXN_UPPER_BOUND) && (float64(result.Txns1h) < float64(result.Txns5m)*MODERATE_TXN_LOW_GROWTH_FACTOR) {
 					meetsCriteria = false
 					result.FailReasons = append(result.FailReasons, fmt.Sprintf("Moderate initial TXN with very low growth: Tx(5m) in [%d,%d] AND Tx(1h)<Tx(5m)*%.2f", MODERATE_TXN_LOWER_BOUND, MODERATE_TXN_UPPER_BOUND, MODERATE_TXN_LOW_GROWTH_FACTOR))
 				}
 
-				// Filter D: Simplified High 5m Volume to Liquidity Ratio with Low MC
 				if meetsCriteria && result.LiquidityUSD > 0 {
 					volToLiqRatio := result.Volume5m / result.LiquidityUSD
 					if volToLiqRatio > VOL_LIQ_IMBALANCE_RATIO_THRESHOLD && result.MarketCap < (minMarketCap*1.5) {
@@ -329,18 +335,38 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 					}
 				}
 
-				// Filter E: High Liquidity Sanity Check
 				if meetsCriteria && result.LiquidityUSD > HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK {
-					// If liquidity is very high, market cap should be reasonably higher.
 					if result.MarketCap < (result.LiquidityUSD * MIN_MC_TO_HIGH_LIQ_RATIO) {
 						meetsCriteria = false
-						result.FailReasons = append(result.FailReasons,
-							fmt.Sprintf("High liquidity ($%.0f > $%.0f) with insufficient MC uplift (MC $%.0f < Liq $%.0f * %.2f)",
-								result.LiquidityUSD,
-								HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK,
-								result.MarketCap,
-								result.LiquidityUSD,
-								MIN_MC_TO_HIGH_LIQ_RATIO))
+						result.FailReasons = append(result.FailReasons, fmt.Sprintf("High liquidity ($%.0f > $%.0f) with insufficient MC uplift (MC $%.0f < Liq $%.0f * %.2f)", result.LiquidityUSD, HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK, result.MarketCap, result.LiquidityUSD, MIN_MC_TO_HIGH_LIQ_RATIO))
+					}
+				}
+
+				// Filter G: Buy/Sell Imbalance
+				if meetsCriteria && result.Txns5m >= MIN_TX_FOR_BS_RATIO_CHECK {
+					if result.Txns5m > 0 { // Avoid division by zero
+						buyRatio5m := float64(result.Txns5mBuys) / float64(result.Txns5m)
+						// sellRatio5m := float64(result.Txns5mSells) / float64(result.Txns5m) // Not strictly needed if checking buys then remaining must be sells
+						if buyRatio5m > BS_RATIO_IMBALANCE_THRESHOLD {
+							meetsCriteria = false
+							result.FailReasons = append(result.FailReasons, fmt.Sprintf("5m Buy Imbalance: %.0f%% Buys (Threshold >%.0f%%)", buyRatio5m*100, BS_RATIO_IMBALANCE_THRESHOLD*100))
+						} else if (1.0 - buyRatio5m) > BS_RATIO_IMBALANCE_THRESHOLD { // Check sell ratio (1 - buyRatio)
+							meetsCriteria = false
+							result.FailReasons = append(result.FailReasons, fmt.Sprintf("5m Sell Imbalance: %.0f%% Sells (Threshold >%.0f%%)", (1.0-buyRatio5m)*100, BS_RATIO_IMBALANCE_THRESHOLD*100))
+						}
+					}
+				}
+				if meetsCriteria && result.Txns1h >= MIN_TX_FOR_BS_RATIO_CHECK {
+					if result.Txns1h > 0 { // Avoid division by zero
+						buyRatio1h := float64(result.Txns1hBuys) / float64(result.Txns1h)
+						// sellRatio1h := float64(result.Txns1hSells) / float64(result.Txns1h)
+						if buyRatio1h > BS_RATIO_IMBALANCE_THRESHOLD {
+							meetsCriteria = false
+							result.FailReasons = append(result.FailReasons, fmt.Sprintf("1h Buy Imbalance: %.0f%% Buys (Threshold >%.0f%%)", buyRatio1h*100, BS_RATIO_IMBALANCE_THRESHOLD*100))
+						} else if (1.0 - buyRatio1h) > BS_RATIO_IMBALANCE_THRESHOLD { // Check sell ratio
+							meetsCriteria = false
+							result.FailReasons = append(result.FailReasons, fmt.Sprintf("1h Sell Imbalance: %.0f%% Sells (Threshold >%.0f%%)", (1.0-buyRatio1h)*100, BS_RATIO_IMBALANCE_THRESHOLD*100))
+						}
 					}
 				}
 			}
@@ -392,24 +418,16 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 		}
 	}
 
-	appLogger.Error("Failed to get valid DexScreener response after retries",
-		tokenField,
-		zap.Int("attempts", maxRetries),
-		zap.Error(lastErr))
+	appLogger.Error("Failed to get valid DexScreener response after retries", tokenField, zap.Int("attempts", maxRetries), zap.Error(lastErr))
 	if errors.Is(lastErr, ErrRateLimited) {
 		cooldownMutex.Lock()
 		now := time.Now()
 		currentCoolDownEnd := coolDownUntil
 		if currentCoolDownEnd.IsZero() || now.After(currentCoolDownEnd) {
 			coolDownUntil = now.Add(time.Duration(globalCooldownSeconds) * time.Second)
-			appLogger.Warn("Persistent DexScreener rate limit hit. Activating global cooldown.",
-				tokenField,
-				zap.Int("cooldownSeconds", globalCooldownSeconds),
-				zap.Error(lastErr))
+			appLogger.Warn("Persistent DexScreener rate limit hit. Activating global cooldown.", tokenField, zap.Int("cooldownSeconds", globalCooldownSeconds), zap.Error(lastErr))
 		} else {
-			appLogger.Info("Persistent DexScreener rate limit hit, but global cooldown already active.",
-				tokenField,
-				zap.Time("coolDownUntil", currentCoolDownEnd))
+			appLogger.Info("Persistent DexScreener rate limit hit, but global cooldown already active.", tokenField, zap.Time("coolDownUntil", currentCoolDownEnd))
 		}
 		cooldownMutex.Unlock()
 	}
