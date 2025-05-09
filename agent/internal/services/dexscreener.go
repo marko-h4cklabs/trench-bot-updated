@@ -26,10 +26,10 @@ const (
 	dexScreenerAPI        = "https://api.dexscreener.com/tokens/v1/solana"
 	globalCooldownSeconds = 100
 
-	// --- Base Metric Filters (Your Current Min/Max) ---
+	// --- Base Metric Filters ---
 	minLiquidity = 30000.0
 	minMarketCap = 50000.0
-	maxMarketCap = 300000.0 // Using your provided value
+	maxMarketCap = 300000.0
 	min5mVolume  = 1000.0
 	min1hVolume  = 10000.0
 	min5mTx      = 100
@@ -48,11 +48,13 @@ const (
 	MODERATE_TXN_UPPER_BOUND       = 1999
 	MODERATE_TXN_LOW_GROWTH_FACTOR = 1.35 // TXNs must grow by at least 35% if initial TXNs were moderate
 
-	// Filter D: Volume/Liquidity Imbalance
+	// Filter D: Simplified High 5m Volume to Liquidity Ratio with Low MC
 	VOL_LIQ_IMBALANCE_RATIO_THRESHOLD = 6.0 // 5m Volume is > 6x Liquidity
-	// VOL_LIQ_IMBALANCE_MC_GROWTH_FACTOR = 1.15 // MarketCap must grow by at least 15% if Vol/Liq ratio is high
-	// ^This MC growth part for Filter D is tricky without MC(5m) vs MC(1h).
-	// We will simplify Filter D for now.
+	// The MC check for Filter D is `result.MarketCap < (minMarketCap * 1.5)`
+
+	// Filter E: High Liquidity Sanity Check
+	HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK = 100000.0 // Apply this check if Liq > $100k
+	MIN_MC_TO_HIGH_LIQ_RATIO              = 1.15     // MC must be at least 115% of Liq if Liq is high
 )
 
 var (
@@ -141,16 +143,13 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 	var lastErr error
 	tokenField := zap.String("tokenCA", tokenCA)
 
-	// --- Cooldown and Rate Limiting (unchanged) ---
 	cooldownMutex.RLock()
 	currentCoolDownUntil := coolDownUntil
 	cooldownMutex.RUnlock()
 
 	if !currentCoolDownUntil.IsZero() && time.Now().Before(currentCoolDownUntil) {
 		waitDuration := time.Until(currentCoolDownUntil)
-		appLogger.Info("DexScreener global cooldown active, waiting.",
-			zap.Duration("waitDuration", waitDuration.Round(time.Second)),
-			tokenField)
+		appLogger.Info("DexScreener global cooldown active, waiting.", zap.Duration("waitDuration", waitDuration.Round(time.Second)), tokenField)
 		time.Sleep(waitDuration)
 		appLogger.Info("DexScreener global cooldown finished, proceeding.", tokenField)
 	}
@@ -166,9 +165,10 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 		}
 
 		appLogger.Debug("Checking DexScreener validity", attemptField, tokenField)
-		url := fmt.Sprintf("%s/%s", dexScreenerAPI, tokenCA)
+		// Renamed 'url' to 'urlAPI' to avoid conflict with 'url' package if imported locally
+		urlAPI := fmt.Sprintf("%s/%s", dexScreenerAPI, tokenCA)
 		client := &http.Client{Timeout: 10 * time.Second}
-		req, _ := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+		req, _ := http.NewRequestWithContext(context.Background(), "GET", urlAPI, nil)
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -250,6 +250,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 
 			meetsCriteria := true
 
+			// 1. Explicit Early Checks
 			if result.LiquidityUSD <= 0 {
 				meetsCriteria = false
 				result.FailReasons = append(result.FailReasons, "Liquidity is zero or negative")
@@ -263,6 +264,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				result.FailReasons = append(result.FailReasons, "5m Volume and 1h Volume are identical and > 0")
 			}
 
+			// 2. Base Min/Max Filters
 			if meetsCriteria {
 				if result.LiquidityUSD < minLiquidity {
 					meetsCriteria = false
@@ -294,13 +296,13 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				}
 			}
 
+			// 3. Advanced Filters
 			if meetsCriteria {
 				// Filter A: Stagnation Filter
-				// Using float64 conversion for explicit type handling in comparison
-				volCheck := result.Volume1h < result.Volume5m*STAGNATION_GROWTH_FACTOR
-				txnCheck := float64(result.Txns1h) < float64(result.Txns5m)*STAGNATION_GROWTH_FACTOR
-				if volCheck && txnCheck {
-					if !(result.Volume5m == 0 && result.Txns5m == 0) { // Don't flag if started from zero activity
+				volCheckStagnation := result.Volume1h < result.Volume5m*STAGNATION_GROWTH_FACTOR
+				txnCheckStagnation := float64(result.Txns1h) < float64(result.Txns5m)*STAGNATION_GROWTH_FACTOR
+				if volCheckStagnation && txnCheckStagnation {
+					if !(result.Volume5m == 0 && result.Txns5m == 0) {
 						meetsCriteria = false
 						result.FailReasons = append(result.FailReasons, fmt.Sprintf("Stagnation: Vol(1h)<Vol(5m)*%.1f AND Tx(1h)<Tx(5m)*%.1f", STAGNATION_GROWTH_FACTOR, STAGNATION_GROWTH_FACTOR))
 					}
@@ -319,13 +321,26 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				}
 
 				// Filter D: Simplified High 5m Volume to Liquidity Ratio with Low MC
-				if meetsCriteria && result.LiquidityUSD > 0 { // Avoid division by zero
+				if meetsCriteria && result.LiquidityUSD > 0 {
 					volToLiqRatio := result.Volume5m / result.LiquidityUSD
-					// Flag if 5m volume is X times liquidity AND market cap is still relatively low (e.g., less than 1.5x minMarketCap)
-					// This suggests high churn without significant price appreciation or MC growth.
 					if volToLiqRatio > VOL_LIQ_IMBALANCE_RATIO_THRESHOLD && result.MarketCap < (minMarketCap*1.5) {
 						meetsCriteria = false
 						result.FailReasons = append(result.FailReasons, fmt.Sprintf("High 5m Vol/Liq ratio (%.2fx) with low MC (%.0f, threshold < %.0f)", volToLiqRatio, result.MarketCap, minMarketCap*1.5))
+					}
+				}
+
+				// Filter E: High Liquidity Sanity Check
+				if meetsCriteria && result.LiquidityUSD > HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK {
+					// If liquidity is very high, market cap should be reasonably higher.
+					if result.MarketCap < (result.LiquidityUSD * MIN_MC_TO_HIGH_LIQ_RATIO) {
+						meetsCriteria = false
+						result.FailReasons = append(result.FailReasons,
+							fmt.Sprintf("High liquidity ($%.0f > $%.0f) with insufficient MC uplift (MC $%.0f < Liq $%.0f * %.2f)",
+								result.LiquidityUSD,
+								HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK,
+								result.MarketCap,
+								result.LiquidityUSD,
+								MIN_MC_TO_HIGH_LIQ_RATIO))
 					}
 				}
 			}
@@ -369,7 +384,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				errorMsgPart += fmt.Sprintf(". Body: %s", string(bodyBytes))
 			}
 			appLogger.Warn(errorMsgPart, attemptField, tokenField, statusField)
-			lastErr = fmt.Errorf(errorMsgPart) // Use the more detailed error message
+			lastErr = fmt.Errorf(errorMsgPart)
 			if attempt < maxRetries-1 {
 				time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
 			}

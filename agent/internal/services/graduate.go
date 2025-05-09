@@ -329,13 +329,14 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	}
 	rawCaptionToSend := strings.TrimSpace(captionBuilder.String())
 
-	// --- Buttons (as per your last update) ---
 	pumpFunURL := fmt.Sprintf("https://pump.fun/coin/%s", tokenAddress)
-	axiomURL := fmt.Sprintf("https://axiom.trade/t/%s", tokenAddress) // Corrected http to https if that's the case
+	axiomURL := fmt.Sprintf("https://axiom.trade/t/%s", tokenAddress)
+	photonURL := fmt.Sprintf("https://photon-sol.tinyastro.io/en/lp/%s", tokenAddress)
 
 	buttons := map[string]string{
 		"🚀 Axiom":    axiomURL,
 		"🧪 Pump.fun": pumpFunURL,
+		"📸 Photon":   photonURL,
 	}
 
 	// --- Send Notification (as per your last update) ---
