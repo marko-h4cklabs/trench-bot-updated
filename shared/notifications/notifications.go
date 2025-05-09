@@ -169,21 +169,32 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID, ReplyMarkup: replyMarkup}
 			sentMsg, currentErr = localBot.SendMessage(ctx, params)
 		}
-		cancel()
+		cancel() // cancel() should be called regardless of error to free resources
+
+		// ***** ADDED/MODIFIED LOGGING BLOCK from previous suggestion - KEEP THIS *****
+		if currentErr != nil {
+			log.Printf("ERROR: Telegram API call failed %s (Attempt %d/%d). Error: %v. Request Data: (photo=%t, photoURL=%s, caption_snippet=%.100s...)",
+				logCtx, attempt+1, maxRetries, currentErr, isPhoto, photoURL, escapedTextOrCaption)
+			var apiErr *telegoapi.Error
+			if errors.As(currentErr, &apiErr) {
+				log.Printf("ERROR_DETAILS: API Error Code: %d, Description: %s, Parameters: %+v %s",
+					apiErr.ErrorCode, apiErr.Description, apiErr.Parameters, logCtx)
+			}
+		} else if sentMsg == nil || sentMsg.MessageID == 0 {
+			log.Printf("WARN: Telegram API call seemingly succeeded (no error) but no valid message returned %s (Attempt %d/%d). Msg: %+v", logCtx, attempt+1, maxRetries, sentMsg)
+			if currentErr == nil {
+				currentErr = errors.New("no message returned from Telegram API after successful-looking call")
+			}
+		}
+		// ***** END OF ADDED LOGGING BLOCK *****
 
 		if currentErr == nil && sentMsg != nil && sentMsg.MessageID != 0 {
 			log.Printf("INFO: Telegram message sent successfully %s (MsgID: %d)", logCtx, sentMsg.MessageID)
 			return nil // Success!
 		}
 
-		// Log the error for this attempt
-		if currentErr != nil {
-			log.Printf("ERROR: Send API Call FAILED %s (Attempt %d/%d). Error: %v", logCtx, attempt+1, maxRetries, currentErr)
-		} else {
-			log.Printf("WARN: Send API Call SUCCEEDED according to error status but MsgID is 0 %s (Attempt %d/%d).", logCtx, attempt+1, maxRetries)
-		}
-
-		lastErr = currentErr // Store the error from this attempt
+		// This was already assigned above, ensure it reflects the latest error if one was created for nil msg
+		lastErr = currentErr
 
 		// --- Retry / Fallback Logic ---
 		shouldRetry := false
@@ -191,12 +202,10 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		if currentErr != nil {
 			var apiErr *telegoapi.Error
 			if errors.As(currentErr, &apiErr) {
-				// Handle Rate Limiting
 				if apiErr.ErrorCode == 429 && apiErr.Parameters != nil {
 					specificRetryAfter = apiErr.Parameters.RetryAfter
 					shouldRetry = true
-				} else if apiErr.ErrorCode == 400 { // Handle Bad Requests
-					// Non-retryable general 400 errors
+				} else if apiErr.ErrorCode == 400 {
 					nonRetryableSubstrings := []string{"thread not found", "chat not found", "wrong type of chat", "message text is empty", "can't parse entities", "Text buttons are unallowed"}
 					isNonRetryable := false
 					for _, sub := range nonRetryableSubstrings {
@@ -206,10 +215,17 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 						}
 					}
 
-					// Known Photo-specific 400 errors that warrant fallback
-					photoErrorSubstrings := []string{"wrong file identifier", "Wrong remote file ID specified", "can't download file", "failed to get HTTP URL content", "PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small", "IMAGE_PROCESS_FAILED"}
+					// ***** THIS IS THE CORRECTED PART *****
+					photoErrorSubstrings := []string{
+						"wrong file identifier", "Wrong remote file ID specified",
+						"can't download file", "failed to get HTTP URL content",
+						"PHOTO_INVALID_DIMENSIONS", "Photo dimensions are too small",
+						"IMAGE_PROCESS_FAILED",
+						"wrong type of the web page content", // <<< ADDED THIS LINE
+					}
+					// ***** END OF CORRECTED PART *****
 					isKnownPhotoError := false
-					if isPhoto { // Only check photo errors if we were trying to send a photo
+					if isPhoto {
 						for _, sub := range photoErrorSubstrings {
 							if strings.Contains(apiErr.Description, sub) {
 								isKnownPhotoError = true
@@ -219,53 +235,44 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 					}
 
 					if isNonRetryable {
-						shouldRetry = false // Don't retry these general errors
-					} else if isKnownPhotoError { // <<< START OF IMMEDIATE FALLBACK LOGIC
-						// --- IMMEDIATE FALLBACK ---
+						shouldRetry = false
+					} else if isKnownPhotoError {
 						log.Printf("INFO: Known photo error detected (%s). Attempting fallback to text. %s", apiErr.Description, logCtx)
-						// Call recursively, forcing text mode. Pass original markup!
-						fallbackErr := coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "", replyMarkup)
+						fallbackErr := coreSendMessageWithRetry(chatID, messageThreadID, rawTextOrCaption, false, "", replyMarkup) // Pass replyMarkup for buttons
 						if fallbackErr != nil {
 							log.Printf("ERROR: Fallback to text ALSO FAILED. Original Error: %v. Fallback Error: %v. %s", currentErr, fallbackErr, logCtx)
-							// Keep the original error as the primary cause
-							lastErr = currentErr
-							shouldRetry = false // Ensure loop terminates
+							lastErr = currentErr // Keep original error
+							shouldRetry = false
 						} else {
 							log.Printf("INFO: Fallback to text succeeded. %s", logCtx)
-							return nil // Fallback worked, so return success immediately
+							return nil // Fallback worked
 						}
-						// --- END IMMEDIATE FALLBACK ---
-					} else { // <<< END OF IMMEDIATE FALLBACK LOGIC
-						// Default for other unknown 400 errors
+					} else {
+						// For other 400 errors not in nonRetryableSubstrings or photoErrorSubstrings
+						log.Printf("WARN: Unhandled 400 Bad Request: %s. Not retrying. %s", apiErr.Description, logCtx)
 						shouldRetry = false
 					}
 				} else if apiErr.ErrorCode == 403 || apiErr.ErrorCode == 401 || apiErr.ErrorCode == 404 {
-					// Definitively non-retryable errors
 					shouldRetry = false
-				} else {
-					// Assume other errors (like 5xx server errors) might be transient
+				} else { // For 5xx errors or other API errors
 					shouldRetry = true
 				}
-			} else {
-				// Network errors or other non-API errors, usually worth retrying
+			} else { // Network errors, etc.
 				shouldRetry = true
 			}
-		} else {
-			// If currentErr was nil but we didn't return success (e.g., MsgID was 0), retry
+		} else { // currentErr was nil, but message sending didn't fully succeed (e.g., sentMsg was nil or MsgID was 0)
 			shouldRetry = true
 		}
 
-		// Check if we should stop retrying
 		if !shouldRetry || attempt >= maxRetries-1 {
 			if shouldRetry && attempt >= maxRetries-1 {
 				log.Printf("ERROR: Max retries (%d) reached. Aborting. %s", maxRetries, logCtx)
 			} else if !shouldRetry {
-				log.Printf("ERROR: Non-retryable error encountered or fallback attempted. Aborting retry loop. %s", logCtx)
+				log.Printf("ERROR: Non-retryable error encountered or fallback attempted and failed. Aborting retry loop. %s", logCtx)
 			}
-			break // Exit the retry loop
+			break
 		}
 
-		// Calculate wait duration
 		waitDuration := baseRetryWait * time.Duration(math.Pow(2, float64(attempt)))
 		if specificRetryAfter > 0 {
 			waitDuration = time.Duration(specificRetryAfter) * time.Second
@@ -275,15 +282,12 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		}
 		log.Printf("INFO: Retrying failed send in %v... %s", waitDuration, logCtx)
 		time.Sleep(waitDuration)
-	} // --- End retry loop ---
-
-	// If we exited the loop and still have an error (meaning fallback didn't happen or wasn't triggered)
-	if lastErr != nil {
-		log.Printf("ERROR: Telegram message FAILED after all attempts/fallbacks. Final Error: %v. %s", lastErr, logCtx)
-		// Note: The explicit post-loop fallback logic is removed because it's now handled *within* the loop.
 	}
 
-	return lastErr // Return the last encountered error
+	if lastErr != nil {
+		log.Printf("ERROR: Telegram message FAILED after all attempts/fallbacks. Final Error: %v. %s", lastErr, logCtx)
+	}
+	return lastErr
 }
 
 // --- END OF UPDATED FUNCTION ---
