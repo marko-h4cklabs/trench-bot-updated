@@ -26,15 +26,33 @@ const (
 	dexScreenerAPI        = "https://api.dexscreener.com/tokens/v1/solana"
 	globalCooldownSeconds = 100
 
-	// --- Original Requirements (No Max Liq/Vol/Tx) ---
+	// --- Base Metric Filters (Your Current Min/Max) ---
 	minLiquidity = 30000.0
 	minMarketCap = 50000.0
-	maxMarketCap = 300000.0 // The only original upper bound
+	maxMarketCap = 300000.0 // Using your provided value
 	min5mVolume  = 1000.0
 	min1hVolume  = 10000.0
 	min5mTx      = 100
 	min1hTx      = 500
-	// Maximum values for Liq, Vol, Tx are NOT defined here in this version
+
+	// --- Advanced Filter Constants ---
+	// Filter A: Stagnation
+	STAGNATION_GROWTH_FACTOR = 1.1 // Volume & TXNs must grow by at least 10%
+
+	// Filter B: High Initial TXN, Low Growth
+	HIGH_TXN_THRESHOLD         = 2000
+	HIGH_TXN_LOW_GROWTH_FACTOR = 1.25 // TXNs must grow by at least 25% if initial TXNs were high
+
+	// Filter C: Moderate Initial TXN, Very Low Growth
+	MODERATE_TXN_LOWER_BOUND       = 700
+	MODERATE_TXN_UPPER_BOUND       = 1999
+	MODERATE_TXN_LOW_GROWTH_FACTOR = 1.35 // TXNs must grow by at least 35% if initial TXNs were moderate
+
+	// Filter D: Volume/Liquidity Imbalance
+	VOL_LIQ_IMBALANCE_RATIO_THRESHOLD = 6.0 // 5m Volume is > 6x Liquidity
+	// VOL_LIQ_IMBALANCE_MC_GROWTH_FACTOR = 1.15 // MarketCap must grow by at least 15% if Vol/Liq ratio is high
+	// ^This MC growth part for Filter D is tricky without MC(5m) vs MC(1h).
+	// We will simplify Filter D for now.
 )
 
 var (
@@ -100,8 +118,8 @@ type TxData struct {
 type ValidationResult struct {
 	IsValid                bool
 	PairAddress            string
-	TokenName              string // Added previously
-	TokenSymbol            string // Added previously
+	TokenName              string
+	TokenSymbol            string
 	LiquidityUSD           float64
 	MarketCap              float64
 	Volume5m               float64
@@ -123,6 +141,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 	var lastErr error
 	tokenField := zap.String("tokenCA", tokenCA)
 
+	// --- Cooldown and Rate Limiting (unchanged) ---
 	cooldownMutex.RLock()
 	currentCoolDownUntil := coolDownUntil
 	cooldownMutex.RUnlock()
@@ -142,7 +161,7 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 		err := dexScreenerLimiter.Wait(waitCtx)
 		cancel()
 		if err != nil {
-			appLogger.Error("DexScreener internal rate limiter wait error...", tokenField, zap.Error(err))
+			appLogger.Error("DexScreener internal rate limiter wait error", tokenField, zap.Error(err))
 			return nil, fmt.Errorf("internal rate limiter error for %s: %w", tokenCA, err)
 		}
 
@@ -185,53 +204,29 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 				PairCreatedAtTimestamp: pair.PairCreatedAt,
 				FailReasons:            []string{},
 				OtherSocials:           make(map[string]string),
-				TokenName:              pair.BaseToken.Name,   // Populated previously
-				TokenSymbol:            pair.BaseToken.Symbol, // Populated previously
+				TokenName:              pair.BaseToken.Name,
+				TokenSymbol:            pair.BaseToken.Symbol,
 			}
 
-			// ... (rest of the data population remains the same) ...
 			if pair.Liquidity != nil {
 				result.LiquidityUSD = pair.Liquidity.Usd
-			} else {
-				appLogger.Warn("Liquidity data missing, treating as 0.", tokenField, pairField)
-				result.LiquidityUSD = 0.0
 			}
-
 			result.MarketCap = pair.FDV
 			if pair.MarketCap > 0 {
 				result.MarketCap = pair.MarketCap
 			}
-
-			volume5m, ok5mVol := pair.Volume["m5"]
-			if !ok5mVol {
-				appLogger.Warn("Volume data missing", tokenField, pairField, zap.String("period", "m5"))
-				result.Volume5m = 0
-			} else {
-				result.Volume5m = volume5m
+			if vol5m, ok := pair.Volume["m5"]; ok {
+				result.Volume5m = vol5m
 			}
-
-			volume1h, ok1hVol := pair.Volume["h1"]
-			if !ok1hVol {
-				appLogger.Warn("Volume data missing", tokenField, pairField, zap.String("period", "h1"))
-				result.Volume1h = 0
-			} else {
-				result.Volume1h = volume1h
+			if vol1h, ok := pair.Volume["h1"]; ok {
+				result.Volume1h = vol1h
 			}
-
-			if txData5m, ok := pair.Transactions["m5"]; ok {
-				result.Txns5m = txData5m.Buys + txData5m.Sells
-			} else {
-				appLogger.Warn("Transaction data missing", tokenField, pairField, zap.String("period", "m5"))
-				result.Txns5m = 0
+			if txns5m, ok := pair.Transactions["m5"]; ok {
+				result.Txns5m = txns5m.Buys + txns5m.Sells
 			}
-
-			if txData1h, ok := pair.Transactions["h1"]; ok {
-				result.Txns1h = txData1h.Buys + txData1h.Sells
-			} else {
-				appLogger.Warn("Transaction data missing", tokenField, pairField, zap.String("period", "h1"))
-				result.Txns1h = 0
+			if txns1h, ok := pair.Transactions["h1"]; ok {
+				result.Txns1h = txns1h.Buys + txns1h.Sells
 			}
-
 			if pair.Info != nil {
 				result.ImageURL = pair.Info.ImageURL
 				if len(pair.Info.Websites) > 0 {
@@ -248,79 +243,108 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 					}
 				}
 			}
-
-			appLogger.Debug("DexScreener data fetched", tokenField, pairField,
-				zap.String("tokenName", result.TokenName),
-				zap.String("tokenSymbol", result.TokenSymbol),
-				zap.Float64("liqUSD", result.LiquidityUSD),
-				zap.Float64("mc", result.MarketCap),
-				zap.Float64("vol5m", result.Volume5m),
-				zap.Float64("vol1h", result.Volume1h),
-				zap.Int("tx5m", result.Txns5m),
-				zap.Int("tx1h", result.Txns1h),
-				zap.Bool("hasWebsite", result.WebsiteURL != ""),
-				zap.Bool("hasTwitter", result.TwitterURL != ""),
-				zap.Bool("hasTelegram", result.TelegramURL != ""),
-				zap.Bool("hasImage", result.ImageURL != ""),
-				zap.Int64("pairCreated", result.PairCreatedAtTimestamp),
-			)
+			appLogger.Debug("DexScreener data fetched for validation", tokenField, pairField,
+				zap.Float64("liqUSD", result.LiquidityUSD), zap.Float64("mc", result.MarketCap),
+				zap.Float64("vol5m", result.Volume5m), zap.Float64("vol1h", result.Volume1h),
+				zap.Int("tx5m", result.Txns5m), zap.Int("tx1h", result.Txns1h))
 
 			meetsCriteria := true
-			failReasons := []string{}
 
-			// --- Original Minimum Checks ---
-			if result.LiquidityUSD < minLiquidity {
+			if result.LiquidityUSD <= 0 {
 				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Liquidity %.0f < %.0f", result.LiquidityUSD, minLiquidity))
+				result.FailReasons = append(result.FailReasons, "Liquidity is zero or negative")
 			}
-			if result.MarketCap < minMarketCap {
+			if result.Txns5m > 0 && result.Txns5m == result.Txns1h {
 				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f < %.0f", result.MarketCap, minMarketCap))
+				result.FailReasons = append(result.FailReasons, "5m TXNs and 1h TXNs are identical and > 0")
 			}
-			if result.Volume5m < min5mVolume {
+			if result.Volume5m > 0 && result.Volume5m == result.Volume1h {
 				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Vol(5m) %.0f < %.0f", result.Volume5m, min5mVolume))
+				result.FailReasons = append(result.FailReasons, "5m Volume and 1h Volume are identical and > 0")
 			}
-			if result.Volume1h < min1hVolume {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Vol(1h) %.0f < %.0f", result.Volume1h, min1hVolume))
-			}
-			if result.Txns5m < min5mTx {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Tx(5m) %d < %d", result.Txns5m, min5mTx))
-			}
-			if result.Txns1h < min1hTx {
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx))
-			}
-
-			// --- Original Maximum Check ---
-			if result.MarketCap > maxMarketCap { // Only the original market cap max check
-				meetsCriteria = false
-				failReasons = append(failReasons, fmt.Sprintf("MarketCap %.0f > %.0f", result.MarketCap, maxMarketCap))
-			}
-			// --- No other maximum checks in this version ---
-
-			result.IsValid = meetsCriteria
-			result.FailReasons = failReasons
 
 			if meetsCriteria {
-				appLogger.Debug("Token meets original criteria", tokenField)
-			} else {
-				appLogger.Debug("Token did not meet original criteria", tokenField, zap.Strings("reasons", failReasons))
+				if result.LiquidityUSD < minLiquidity {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("Liquidity %.0f < %.0f", result.LiquidityUSD, minLiquidity))
+				}
+				if result.MarketCap < minMarketCap {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("MarketCap %.0f < %.0f", result.MarketCap, minMarketCap))
+				}
+				if result.MarketCap > maxMarketCap {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("MarketCap %.0f > %.0f", result.MarketCap, maxMarketCap))
+				}
+				if result.Volume5m < min5mVolume {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("Vol(5m) %.0f < %.0f", result.Volume5m, min5mVolume))
+				}
+				if result.Volume1h < min1hVolume {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("Vol(1h) %.0f < %.0f", result.Volume1h, min1hVolume))
+				}
+				if result.Txns5m < min5mTx {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("Tx(5m) %d < %d", result.Txns5m, min5mTx))
+				}
+				if result.Txns1h < min1hTx {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("Tx(1h) %d < %d", result.Txns1h, min1hTx))
+				}
 			}
 
+			if meetsCriteria {
+				// Filter A: Stagnation Filter
+				// Using float64 conversion for explicit type handling in comparison
+				volCheck := result.Volume1h < result.Volume5m*STAGNATION_GROWTH_FACTOR
+				txnCheck := float64(result.Txns1h) < float64(result.Txns5m)*STAGNATION_GROWTH_FACTOR
+				if volCheck && txnCheck {
+					if !(result.Volume5m == 0 && result.Txns5m == 0) { // Don't flag if started from zero activity
+						meetsCriteria = false
+						result.FailReasons = append(result.FailReasons, fmt.Sprintf("Stagnation: Vol(1h)<Vol(5m)*%.1f AND Tx(1h)<Tx(5m)*%.1f", STAGNATION_GROWTH_FACTOR, STAGNATION_GROWTH_FACTOR))
+					}
+				}
+
+				// Filter B: High Initial TXN, Low Growth Filter
+				if meetsCriteria && (result.Txns5m > HIGH_TXN_THRESHOLD) && (float64(result.Txns1h) < float64(result.Txns5m)*HIGH_TXN_LOW_GROWTH_FACTOR) {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("High initial TXN with low growth: Tx(5m)>%d AND Tx(1h)<Tx(5m)*%.2f", HIGH_TXN_THRESHOLD, HIGH_TXN_LOW_GROWTH_FACTOR))
+				}
+
+				// Filter C: Moderate Initial TXN, Very Low Growth Filter
+				if meetsCriteria && (result.Txns5m >= MODERATE_TXN_LOWER_BOUND && result.Txns5m <= MODERATE_TXN_UPPER_BOUND) && (float64(result.Txns1h) < float64(result.Txns5m)*MODERATE_TXN_LOW_GROWTH_FACTOR) {
+					meetsCriteria = false
+					result.FailReasons = append(result.FailReasons, fmt.Sprintf("Moderate initial TXN with very low growth: Tx(5m) in [%d,%d] AND Tx(1h)<Tx(5m)*%.2f", MODERATE_TXN_LOWER_BOUND, MODERATE_TXN_UPPER_BOUND, MODERATE_TXN_LOW_GROWTH_FACTOR))
+				}
+
+				// Filter D: Simplified High 5m Volume to Liquidity Ratio with Low MC
+				if meetsCriteria && result.LiquidityUSD > 0 { // Avoid division by zero
+					volToLiqRatio := result.Volume5m / result.LiquidityUSD
+					// Flag if 5m volume is X times liquidity AND market cap is still relatively low (e.g., less than 1.5x minMarketCap)
+					// This suggests high churn without significant price appreciation or MC growth.
+					if volToLiqRatio > VOL_LIQ_IMBALANCE_RATIO_THRESHOLD && result.MarketCap < (minMarketCap*1.5) {
+						meetsCriteria = false
+						result.FailReasons = append(result.FailReasons, fmt.Sprintf("High 5m Vol/Liq ratio (%.2fx) with low MC (%.0f, threshold < %.0f)", volToLiqRatio, result.MarketCap, minMarketCap*1.5))
+					}
+				}
+			}
+
+			result.IsValid = meetsCriteria
+			if result.IsValid {
+				appLogger.Debug("Token passed all validation criteria.", tokenField)
+			} else {
+				appLogger.Info("Token failed validation criteria.", tokenField, zap.Strings("reasons", result.FailReasons))
+			}
 			return result, nil
 		}
 
-		// ... (Error handling and retry logic remains the same) ...
 		lastErr = fmt.Errorf("API request failed with status: %d", statusCode)
-
 		if statusCode == http.StatusTooManyRequests {
 			lastErr = ErrRateLimited
 			retryAfterHeader := resp.Header.Get("Retry-After")
 			retryAfterSeconds := 0
-			if secs, err := strconv.Atoi(retryAfterHeader); err == nil && secs > 0 {
+			if secs, errConv := strconv.Atoi(retryAfterHeader); errConv == nil && secs > 0 {
 				retryAfterSeconds = secs
 			} else {
 				retryAfterSeconds = int(math.Pow(2, float64(attempt))) + 1
@@ -329,25 +353,23 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 			if retryAfterSeconds > maxWait {
 				retryAfterSeconds = maxWait
 			}
-
 			appLogger.Warn("DexScreener rate limit hit", attemptField, tokenField, statusField, zap.Int("retryAfter", retryAfterSeconds))
 			if attempt < maxRetries-1 {
 				time.Sleep(time.Duration(retryAfterSeconds) * time.Second)
 			}
 			continue
-
 		} else if statusCode == http.StatusNotFound {
 			appLogger.Info("Token not found on DexScreener", tokenField, statusField)
-			// Keep TokenName/Symbol fields even on failure for consistency? Let's keep it simpler and only populate on success.
 			return &ValidationResult{IsValid: false, FailReasons: []string{"Token not found on DexScreener"}}, nil
-
 		} else {
-			errorMsg := fmt.Sprintf("DexScreener API non-OK status: %d", statusCode)
+			errorMsgPart := fmt.Sprintf("DexScreener API non-OK status: %d", statusCode)
 			if readErr != nil {
-				errorMsg += fmt.Sprintf(". Failed to read response body: %v", readErr)
+				errorMsgPart += fmt.Sprintf(". Failed to read response body: %v", readErr)
+			} else {
+				errorMsgPart += fmt.Sprintf(". Body: %s", string(bodyBytes))
 			}
-			appLogger.Warn(errorMsg, attemptField, tokenField, statusField, zap.ByteString("body", bodyBytes))
-			lastErr = fmt.Errorf(errorMsg)
+			appLogger.Warn(errorMsgPart, attemptField, tokenField, statusField)
+			lastErr = fmt.Errorf(errorMsgPart) // Use the more detailed error message
 			if attempt < maxRetries-1 {
 				time.Sleep(baseRetryWait * time.Duration(math.Pow(2, float64(attempt))))
 			}
@@ -355,12 +377,10 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 		}
 	}
 
-	// ... (Final error handling and cooldown logic remains the same) ...
 	appLogger.Error("Failed to get valid DexScreener response after retries",
 		tokenField,
 		zap.Int("attempts", maxRetries),
 		zap.Error(lastErr))
-
 	if errors.Is(lastErr, ErrRateLimited) {
 		cooldownMutex.Lock()
 		now := time.Now()
@@ -378,6 +398,5 @@ func IsTokenValid(tokenCA string, appLogger *logger.Logger) (*ValidationResult, 
 		}
 		cooldownMutex.Unlock()
 	}
-
 	return nil, lastErr
 }
