@@ -101,7 +101,7 @@ func EscapeMarkdownV2(s string) string {
 	for _, r := range s {
 		char := string(r)
 		shouldEscape := false
-		if char == "`" || char == "|" {
+		if char == "`" {
 			shouldEscape = false
 		} else {
 			for _, esc := range charsToEscape {
