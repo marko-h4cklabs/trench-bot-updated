@@ -94,27 +94,36 @@ func GetBotInstance() *telego.Bot {
 	return bot
 }
 
+// FILE: agent/shared/notifications/notifications.go
+
 func EscapeMarkdownV2(s string) string {
-	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", ">", "#", "+", "-", "=", "{", "}", ".", "!"}
+	// CRITICAL CHANGE: '|' is NOW INCLUDED in this list.
+	charsToEscape := []string{"_", "*", "[", "]", "(", ")", "~", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	var builder strings.Builder
 	builder.Grow(len(s) + 20)
+
 	for _, r := range s {
-		char := string(r)
-		shouldEscape := false
-		if char == "`" {
-			shouldEscape = false
-		} else {
-			for _, esc := range charsToEscape {
-				if char == esc {
-					shouldEscape = true
-					break
-				}
+		charStr := string(r)
+
+		// We still don't escape '`' because you use it for code blocks like `CA_ADDRESS`.
+		// You manually put these backticks in your caption string.
+		if charStr == "`" {
+			builder.WriteRune(r)
+			continue // Skip further checks for backtick, just write it as is
+		}
+
+		needsEscaping := false
+		for _, esc := range charsToEscape {
+			if charStr == esc { // Check if current character is one that needs escaping
+				needsEscaping = true
+				break
 			}
 		}
-		if shouldEscape {
-			builder.WriteRune('\\')
+
+		if needsEscaping { // If it's in charsToEscape (and wasn't a backtick)
+			builder.WriteRune('\\') // Prepend the escape character '\'
 		}
-		builder.WriteRune(r)
+		builder.WriteRune(r) // Write the original character
 	}
 	return builder.String()
 }
