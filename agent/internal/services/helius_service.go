@@ -90,14 +90,14 @@ func (hs *HeliusService) GetLPTokensInPair(lpPairAccountAddressStr string, targe
 		context.Background(),
 		lpPairOwnerPubKey,
 		&rpc.GetTokenAccountsConfig{
-			Mint:      &targetMintPubKey,
-			ProgramId: solana.TokenProgramID.ToPointer(),
+			Mint: &targetMintPubKey,
 		},
 		&rpc.GetTokenAccountsOpts{
 			Commitment: rpc.CommitmentFinalized,
 			Encoding:   solana.EncodingJSONParsed,
 		},
 	)
+
 	if err != nil {
 		hs.appLogger.Error("RPC error fetching LP token accounts", zap.Error(err))
 		return 0, fmt.Errorf("failed to fetch token accounts: %w", err)
