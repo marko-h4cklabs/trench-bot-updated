@@ -21,7 +21,6 @@ type HeliusService struct {
 	appLogger *logger.Logger
 }
 
-// NewHeliusService creates a new instance of HeliusService.
 func NewHeliusService(appLogger *logger.Logger) (*HeliusService, error) {
 	rpcURL := env.HeliusRPCURL
 	if rpcURL == "" {
@@ -45,28 +44,45 @@ func sanitizeURL(rawURL string) string {
 }
 
 func (hs *HeliusService) GetTokenSupply(mintAddressStr string) (uint64, error) {
+	hs.appLogger.Debug("HeliusService: Attempting GetTokenSupply", zap.String("mint", mintAddressStr))
 	mintPubKey, err := solana.PublicKeyFromBase58(mintAddressStr)
 	if err != nil {
+		hs.appLogger.Error("HeliusService: Invalid mint address for GetTokenSupply", zap.String("mint", mintAddressStr), zap.Error(err))
 		return 0, fmt.Errorf("invalid mint address '%s': %w", mintAddressStr, err)
 	}
+
 	out, err := hs.rpcClient.GetTokenSupply(context.Background(), mintPubKey, rpc.CommitmentFinalized)
-	if err != nil || out == nil || out.Value == nil {
-		return 0, fmt.Errorf("GetTokenSupply failed: %w", err)
+	if err != nil {
+		hs.appLogger.Error("HeliusService: RPC GetTokenSupply call failed", zap.String("mint", mintAddressStr), zap.Error(err))
+		return 0, fmt.Errorf("GetTokenSupply for %s failed: %w", mintAddressStr, err)
 	}
+	// Log the raw output for debugging
+	hs.appLogger.Debug("HeliusService: GetTokenSupply RPC response", zap.String("mint", mintAddressStr), zap.Any("rpcOutput", out))
+	if out == nil || out.Value == nil {
+		hs.appLogger.Warn("HeliusService: GetTokenSupply returned nil or nil value", zap.String("mint", mintAddressStr))
+		return 0, fmt.Errorf("GetTokenSupply for %s returned nil value", mintAddressStr)
+	}
+
 	supply, err := strconv.ParseUint(out.Value.Amount, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse token supply amount: %w", err)
+		hs.appLogger.Error("HeliusService: Failed to parse token supply amount", zap.String("mint", mintAddressStr), zap.String("amountStr", out.Value.Amount), zap.Error(err))
+		return 0, fmt.Errorf("parsing token supply for %s failed: %w", mintAddressStr, err)
 	}
+	hs.appLogger.Info("HeliusService: Successfully fetched token supply", zap.String("mint", mintAddressStr), zap.Uint64("supply", supply))
 	return supply, nil
 }
 
 func (hs *HeliusService) GetLPTokensInPair(lpPairAccountAddressStr string, targetTokenMintStr string) (uint64, error) {
+	hs.appLogger.Debug("GetLPTokensInPair: Starting", zap.String("lpPairAccount", lpPairAccountAddressStr), zap.String("targetMint", targetTokenMintStr))
+
 	lpPairOwnerPubKey, err := solana.PublicKeyFromBase58(lpPairAccountAddressStr)
 	if err != nil {
+		hs.appLogger.Error("Invalid LP pair address", zap.String("lpPairAccount", lpPairAccountAddressStr), zap.Error(err))
 		return 0, fmt.Errorf("invalid LP pair address '%s': %w", lpPairAccountAddressStr, err)
 	}
 	targetMintPubKey, err := solana.PublicKeyFromBase58(targetTokenMintStr)
 	if err != nil {
+		hs.appLogger.Error("Invalid target token mint", zap.String("targetMint", targetTokenMintStr), zap.Error(err))
 		return 0, fmt.Errorf("invalid target token mint address '%s': %w", targetTokenMintStr, err)
 	}
 
@@ -82,13 +98,21 @@ func (hs *HeliusService) GetLPTokensInPair(lpPairAccountAddressStr string, targe
 			Encoding:   solana.EncodingJSONParsed,
 		},
 	)
-	if err != nil || len(tokenAccountsResult.Value) == 0 {
+	if err != nil {
+		hs.appLogger.Error("RPC error fetching LP token accounts", zap.Error(err))
 		return 0, fmt.Errorf("failed to fetch token accounts: %w", err)
+	}
+	if len(tokenAccountsResult.Value) == 0 {
+		hs.appLogger.Warn("No token accounts found for LP pair owner and target mint", zap.String("lpOwner", lpPairAccountAddressStr), zap.String("targetMint", targetTokenMintStr))
+		return 0, fmt.Errorf("no token accounts found")
 	}
 
 	parsedRaw := tokenAccountsResult.Value[0].Account.Data
+	hs.appLogger.Debug("Raw LP token account data", zap.Any("parsedRaw", parsedRaw))
+
 	parsedBytes, err := json.Marshal(parsedRaw)
 	if err != nil {
+		hs.appLogger.Error("Failed to marshal LP token account parsed data", zap.Error(err))
 		return 0, fmt.Errorf("failed to marshal parsed account data: %w", err)
 	}
 
@@ -107,14 +131,23 @@ func (hs *HeliusService) GetLPTokensInPair(lpPairAccountAddressStr string, targe
 
 	var parsed Wrapper
 	if err := json.Unmarshal(parsedBytes, &parsed); err != nil {
+		hs.appLogger.Error("Failed to unmarshal LP token parsed data", zap.ByteString("parsedBytes", parsedBytes), zap.Error(err))
 		return 0, fmt.Errorf("failed to unmarshal parsed data: %w", err)
 	}
 
 	amountStr := parsed.Parsed.Info.TokenAmount.Amount
 	if amountStr == "" {
+		hs.appLogger.Error("Parsed LP token amount is empty", zap.Any("parsed", parsed))
 		return 0, fmt.Errorf("token amount is empty")
 	}
-	return strconv.ParseUint(amountStr, 10, 64)
+
+	amount, err := strconv.ParseUint(amountStr, 10, 64)
+	if err != nil {
+		hs.appLogger.Error("Failed to parse LP token amount string", zap.String("amountStr", amountStr), zap.Error(err))
+		return 0, err
+	}
+	hs.appLogger.Info("LP token amount parsed successfully", zap.Uint64("amount", amount))
+	return amount, nil
 }
 
 func getMapKeys(m map[string]interface{}) []string {
@@ -126,8 +159,11 @@ func getMapKeys(m map[string]interface{}) []string {
 }
 
 func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int, lpPairAddressStr, knownBurnAddressStr string) ([]HolderInfo, error) {
+	hs.appLogger.Debug("GetTopEOAHolders: Starting", zap.String("mint", mintAddressStr))
+
 	mintPubKey, err := solana.PublicKeyFromBase58(mintAddressStr)
 	if err != nil {
+		hs.appLogger.Error("Invalid mint address", zap.String("mint", mintAddressStr), zap.Error(err))
 		return nil, fmt.Errorf("invalid mint address: %w", err)
 	}
 
@@ -145,9 +181,16 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 	}
 
 	largestAccounts, err := hs.rpcClient.GetTokenLargestAccounts(context.Background(), mintPubKey, rpc.CommitmentFinalized)
-	if err != nil || largestAccounts == nil || largestAccounts.Value == nil {
+	if err != nil {
+		hs.appLogger.Error("RPC GetTokenLargestAccounts failed", zap.String("mint", mintAddressStr), zap.Error(err))
 		return nil, fmt.Errorf("GetTokenLargestAccounts failed: %w", err)
 	}
+	if largestAccounts == nil || largestAccounts.Value == nil {
+		hs.appLogger.Warn("No largest accounts returned", zap.String("mint", mintAddressStr))
+		return nil, fmt.Errorf("no largest accounts found")
+	}
+
+	hs.appLogger.Debug("Fetched largest accounts", zap.Int("count", len(largestAccounts.Value)))
 
 	holders := make(map[string]uint64)
 	initialQueryLimit := numToReturn + 25
@@ -158,19 +201,24 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 		if i >= initialQueryLimit {
 			break
 		}
+
 		accInfo, err := hs.rpcClient.GetAccountInfo(context.Background(), acc.Address)
 		if err != nil || accInfo == nil || accInfo.Value == nil {
+			hs.appLogger.Warn("Skipping account due to failed GetAccountInfo", zap.String("address", acc.Address.String()), zap.Error(err))
 			continue
 		}
 		owner := accInfo.Value.Owner
 		if (lpValid && owner.Equals(lpPubKey)) || (burnValid && owner.Equals(burnPubKey)) {
+			hs.appLogger.Debug("Skipping known LP or burn owner", zap.String("owner", owner.String()))
 			continue
 		}
 		if owner.Equals(solana.TokenProgramID) || owner.Equals(solana.SystemProgramID) || owner.Equals(solana.SPLAssociatedTokenAccountProgramID) {
+			hs.appLogger.Debug("Skipping system/program account", zap.String("owner", owner.String()))
 			continue
 		}
 		amount, err := strconv.ParseUint(acc.Amount, 10, 64)
 		if err != nil {
+			hs.appLogger.Warn("Failed to parse token amount", zap.String("amount", acc.Amount), zap.Error(err))
 			continue
 		}
 		holders[owner.String()] += amount
@@ -186,5 +234,7 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 	if len(result) > numToReturn {
 		result = result[:numToReturn]
 	}
+
+	hs.appLogger.Info("Top EOA holders fetched", zap.Int("returned", len(result)), zap.String("mint", mintAddressStr))
 	return result, nil
 }
