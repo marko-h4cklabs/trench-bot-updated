@@ -302,3 +302,46 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 	hs.appLogger.Info("GetTopEOAHolders: Top EOA holders fetched", zap.Int("returnedCount", len(result)), zap.String("mint", mintAddressStr))
 	return result, nil
 }
+
+// GetMintFromTokenAccount takes a token account address and returns the mint address it holds.
+func (hs *HeliusService) GetMintFromTokenAccount(tokenAccountStr string) (string, error) {
+	pubKey, err := solana.PublicKeyFromBase58(tokenAccountStr)
+	if err != nil {
+		hs.appLogger.Error("GetMintFromTokenAccount: Invalid token account address", zap.String("input", tokenAccountStr), zap.Error(err))
+		return "", fmt.Errorf("invalid token account address: %w", err)
+	}
+
+	accountInfo, err := hs.rpcClient.GetAccountInfo(context.Background(), pubKey)
+	if err != nil || accountInfo == nil || accountInfo.Value == nil {
+		hs.appLogger.Error("GetMintFromTokenAccount: Failed to fetch account info", zap.String("address", tokenAccountStr), zap.Error(err))
+		return "", fmt.Errorf("failed to fetch account info: %w", err)
+	}
+
+	rawJson := accountInfo.Value.Data.GetRawJSON()
+	if len(rawJson) == 0 || string(rawJson) == "null" {
+		hs.appLogger.Warn("GetMintFromTokenAccount: Empty or null raw JSON", zap.String("address", tokenAccountStr))
+		return "", fmt.Errorf("account data is empty or null")
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(rawJson, &parsed); err != nil {
+		hs.appLogger.Error("GetMintFromTokenAccount: Failed to parse account JSON", zap.String("address", tokenAccountStr), zap.Error(err))
+		return "", fmt.Errorf("failed to parse account data: %w", err)
+	}
+
+	parsedInfo, ok := parsed["parsed"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("account does not contain parsed data")
+	}
+	info, ok := parsedInfo["info"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("account parsed data missing 'info'")
+	}
+	mintStr, ok := info["mint"].(string)
+	if !ok || mintStr == "" {
+		return "", fmt.Errorf("could not extract mint from token account")
+	}
+
+	hs.appLogger.Debug("GetMintFromTokenAccount: Extracted mint", zap.String("mint", mintStr))
+	return mintStr, nil
+}

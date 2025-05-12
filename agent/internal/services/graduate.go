@@ -145,8 +145,21 @@ func CalculateQualityAndBundling(
 		analysis.QualityRating = 1
 		return analysis, fmt.Errorf("failed to get total supply for %s: %w", mintAddressForHelius, err)
 	}
+	lpMintResolved := ""
+	lpMintResolved, err = heliusSvc.GetMintFromTokenAccount(valResult.PairAddress)
+	if err != nil {
+		appLogger.Warn("Could not resolve LP mint from token account", tokenField, zap.String("lpAccount", valResult.PairAddress), zap.Error(err))
+	}
 
-	tokensInLP, err := heliusSvc.GetLPTokensInPair(valResult.PairAddress, mintAddressForHelius) // <-- Use HeliusService method
+	tokensInLP := uint64(0)
+	if lpMintResolved != "" {
+		tokensInLP, err = heliusSvc.GetLPTokensInPair(lpMintResolved, mintAddressForHelius)
+		if err != nil {
+			appLogger.Warn("Could not determine tokens in LP for bundling analysis", tokenField, zap.Error(err))
+			tokensInLP = 0
+		}
+	}
+
 	if err != nil {
 		appLogger.Warn("Could not determine tokens in LP for bundling analysis", tokenField, zap.Error(err))
 		tokensInLP = 0
