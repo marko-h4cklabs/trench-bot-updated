@@ -209,11 +209,18 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 			continue
 		}
 
-		var parsedData map[string]interface{}
-		if err := json.Unmarshal(accInfo.Value.Data.GetRawJSON(), &parsedData); err != nil {
-			hs.appLogger.Warn("Failed to parse JSON from account data", zap.String("address", acc.Address.String()), zap.Error(err))
+		rawJson := accInfo.Value.Data.GetRawJSON()
+		if len(rawJson) == 0 || string(rawJson) == "null" {
+			hs.appLogger.Warn("Empty or null raw JSON from account data", zap.String("address", acc.Address.String()))
 			continue
 		}
+
+		var parsedData map[string]interface{}
+		if err := json.Unmarshal(rawJson, &parsedData); err != nil {
+			hs.appLogger.Warn("Failed to parse JSON from account data", zap.String("address", acc.Address.String()), zap.ByteString("rawJson", rawJson), zap.Error(err))
+			continue
+		}
+
 		parsed, ok := parsedData["parsed"].(map[string]interface{})
 		if !ok {
 			hs.appLogger.Warn("AccountInfo parsed field is not a map", zap.String("address", acc.Address.String()))
