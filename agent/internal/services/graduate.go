@@ -146,9 +146,13 @@ func CalculateQualityAndBundling(
 		return analysis, fmt.Errorf("failed to get total supply for %s: %w", mintAddressForHelius, err)
 	}
 	lpMintResolved := ""
-	lpMintResolved, err = heliusSvc.GetMintFromTokenAccount(valResult.PairAddress)
-	if err != nil {
-		appLogger.Warn("Could not resolve LP mint from token account", tokenField, zap.String("lpAccount", valResult.PairAddress), zap.Error(err))
+	if strings.HasPrefix(valResult.PairAddress, "So11111111111111111111111111111111111111112") {
+		appLogger.Warn("PairAddress appears to be a swap program or SOL system address, skipping LP resolution", tokenField)
+	} else {
+		lpMintResolved, err = heliusSvc.GetMintFromTokenAccount(valResult.PairAddress)
+		if err != nil || lpMintResolved == "" {
+			appLogger.Warn("Could not resolve LP mint from token account", tokenField, zap.String("lpAccount", valResult.PairAddress), zap.Error(err))
+		}
 	}
 
 	tokensInLP := uint64(0)
@@ -214,6 +218,14 @@ func CalculateQualityAndBundling(
 			analysis.Top1HolderEOAPercent, analysis.Top5HolderEOAPercent, analysis.LPTokensPercentOfTotal,
 		)
 	}
+
+	appLogger.Info("Debugging LP and EOA holder results",
+		tokenField,
+		zap.String("resolvedLPMint", lpMintResolved),
+		zap.Uint64("tokensInLP", tokensInLP),
+		zap.Float64("top1EOA%", analysis.Top1HolderEOAPercent),
+		zap.Float64("top5EOA%", analysis.Top5HolderEOAPercent),
+	)
 
 	// --- Rating Calculation Logic (Same as before) ---
 	currentRating := BASE_RATING

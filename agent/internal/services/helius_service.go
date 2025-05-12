@@ -211,81 +211,67 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 	}
 	if largestAccounts == nil || largestAccounts.Value == nil {
 		hs.appLogger.Warn("GetTopEOAHolders: No largest accounts returned by RPC", zap.String("mint", mintAddressStr))
-		return []HolderInfo{}, nil // Return empty, not an error
+		return []HolderInfo{}, nil
 	}
 
 	hs.appLogger.Debug("GetTopEOAHolders: Fetched largest token accounts", zap.Int("count", len(largestAccounts.Value)))
 
-	holders := make(map[string]uint64)    // EOA Owner Address -> Aggregated Amount
-	initialQueryLimit := numToReturn + 25 // Fetch more initially to account for filtering
+	holders := make(map[string]uint64)
+	initialQueryLimit := numToReturn + 25
 	processedAccountCount := 0
 
 	for _, accRpcInfo := range largestAccounts.Value {
-		if len(holders) >= numToReturn && processedAccountCount >= numToReturn { // Stop if we have enough distinct EOAs
+		if len(holders) >= numToReturn && processedAccountCount >= numToReturn {
 			hs.appLogger.Debug("GetTopEOAHolders: Reached desired number of EOA holders", zap.Int("found", len(holders)))
 			break
 		}
-		if processedAccountCount >= initialQueryLimit { // Hard stop after processing a certain number
+		if processedAccountCount >= initialQueryLimit {
 			hs.appLogger.Debug("GetTopEOAHolders: Reached initial query limit for processing", zap.Int("processed", processedAccountCount))
 			break
 		}
 		processedAccountCount++
 
-		tokenAccountAddress := accRpcInfo.Address // This is the Token Account Address
-		hs.appLogger.Debug("GetTopEOAHolders: Processing token account", zap.String("tokenAccount", tokenAccountAddress.String()), zap.String("rawAmount", accRpcInfo.Amount))
+		tokenAccountAddress := accRpcInfo.Address
+		hs.appLogger.Debug("Evaluating token account for EOA check",
+			zap.String("tokenAccount", tokenAccountAddress.String()),
+			zap.String("rawAmount", accRpcInfo.Amount))
 
 		accInfo, err := hs.rpcClient.GetAccountInfo(context.Background(), tokenAccountAddress)
 		if err != nil {
-			hs.appLogger.Warn("GetTopEOAHolders: Skipping account due to failed GetAccountInfo", zap.String("tokenAccount", tokenAccountAddress.String()), zap.Error(err))
+			hs.appLogger.Warn("Skipping account due to GetAccountInfo error", zap.String("tokenAccount", tokenAccountAddress.String()), zap.Error(err))
 			continue
 		}
 		if accInfo == nil || accInfo.Value == nil {
-			hs.appLogger.Warn("GetTopEOAHolders: Skipping account due to nil AccountInfo.Value", zap.String("tokenAccount", tokenAccountAddress.String()))
+			hs.appLogger.Warn("Skipping account due to nil AccountInfo.Value", zap.String("tokenAccount", tokenAccountAddress.String()))
 			continue
 		}
 
-		owner := accInfo.Value.Owner // This is the actual owner (EOA or Program)
+		owner := accInfo.Value.Owner
 
-		// Filter out LP, Burn, and common Program addresses
 		if (lpValid && owner.Equals(lpPubKey)) || (burnValid && owner.Equals(burnPubKey)) ||
 			owner.Equals(solana.TokenProgramID) || owner.Equals(solana.SystemProgramID) ||
 			owner.Equals(solana.SPLAssociatedTokenAccountProgramID) ||
 			owner.Equals(solana.BPFLoaderProgramID) || owner.Equals(solana.BPFLoaderUpgradeableProgramID) ||
 			owner.Equals(solana.StakeProgramID) || owner.Equals(solana.VoteProgramID) || owner.Equals(solana.MemoProgramID) {
-			hs.appLogger.Debug("GetTopEOAHolders: Skipping non-EOA or filtered owner", zap.String("tokenAccount", tokenAccountAddress.String()), zap.String("owner", owner.String()))
+
+			hs.appLogger.Debug("Filtered out non-EOA owner",
+				zap.String("tokenAccount", tokenAccountAddress.String()),
+				zap.String("owner", owner.String()))
 			continue
 		}
 
-		// Now, try to parse the account data to confirm it's a token account and get owner (if needed, though owner is from accInfo.Value.Owner)
-		// The main goal here would be if we needed other info from the parsed data.
-		// For just getting owner, accInfo.Value.Owner is enough.
-		// The "unexpected end of JSON input" error happened when unmarshalling `accInfo.Value.Data.GetRawJSON()`
-
-		// Let's log the raw data that caused issues
 		if accInfo.Value.Data == nil {
-			hs.appLogger.Warn("GetTopEOAHolders: accInfo.Value.Data is nil, cannot parse owner for filtering", zap.String("tokenAccount", tokenAccountAddress.String()))
+			hs.appLogger.Warn("Account data is nil; skipping", zap.String("tokenAccount", tokenAccountAddress.String()))
 			continue
 		}
 
-		// Check encoding of this specific account if it helps debugging
-		hs.appLogger.Debug("GetTopEOAHolders: Account data type",
-			zap.String("tokenAccount", tokenAccountAddress.String()),
-			zap.String("dataType", fmt.Sprintf("%T", accInfo.Value.Data)),
-		)
-
-		// For GetTopEOAHolders, we primarily need the owner, which we got from accInfo.Value.Owner.
-		// The parsing of accInfo.Value.Data here was more for robustly confirming it IS a token account,
-		// but if we trust that `GetTokenLargestAccounts` gives us token accounts, and `accInfo.Value.Owner` is an EOA (after filtering),
-		// we might not need to re-parse `accInfo.Value.Data` just to confirm owner again.
-		// The critical part is that `accInfo.Value.Owner` is correct.
-
-		amount, err := strconv.ParseUint(accRpcInfo.Amount, 10, 64) // Amount is from GetTokenLargestAccounts
+		amount, err := strconv.ParseUint(accRpcInfo.Amount, 10, 64)
 		if err != nil {
-			hs.appLogger.Warn("GetTopEOAHolders: Failed to parse token amount for potential EOA", zap.String("amountStr", accRpcInfo.Amount), zap.Error(err))
+			hs.appLogger.Warn("Failed to parse token amount", zap.String("amountStr", accRpcInfo.Amount), zap.Error(err))
 			continue
 		}
 		holders[owner.String()] += amount
-		hs.appLogger.Debug("GetTopEOAHolders: Aggregated for EOA", zap.String("eoaOwner", owner.String()), zap.Uint64("aggregatedAmount", holders[owner.String()]))
+		hs.appLogger.Debug("Added holder", zap.String("eoaOwner", owner.String()), zap.Uint64("amount", holders[owner.String()]))
 	}
 
 	var result []HolderInfo
@@ -299,7 +285,9 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 		result = result[:numToReturn]
 	}
 
-	hs.appLogger.Info("GetTopEOAHolders: Top EOA holders fetched", zap.Int("returnedCount", len(result)), zap.String("mint", mintAddressStr))
+	hs.appLogger.Info("GetTopEOAHolders: Top EOA holders fetched",
+		zap.Int("returnedCount", len(result)),
+		zap.String("mint", mintAddressStr))
 	return result, nil
 }
 
