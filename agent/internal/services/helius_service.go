@@ -247,14 +247,20 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 		}
 
 		owner := accInfo.Value.Owner
+		hs.appLogger.Debug("Account owner fetched", zap.String("owner", owner.String()), zap.String("tokenAccount", tokenAccountAddress.String()))
 
-		if (lpValid && owner.Equals(lpPubKey)) || (burnValid && owner.Equals(burnPubKey)) ||
-			owner.Equals(solana.TokenProgramID) || owner.Equals(solana.SystemProgramID) ||
+		if (lpValid && owner.Equals(lpPubKey)) ||
+			(burnValid && owner.Equals(burnPubKey)) ||
+			!solana.IsOnCurve(owner.Bytes()) || // <-- New: excludes PDAs and program addresses
+			owner.Equals(solana.TokenProgramID) ||
+			owner.Equals(solana.SystemProgramID) ||
 			owner.Equals(solana.SPLAssociatedTokenAccountProgramID) ||
-			owner.Equals(solana.BPFLoaderProgramID) || owner.Equals(solana.BPFLoaderUpgradeableProgramID) ||
-			owner.Equals(solana.StakeProgramID) || owner.Equals(solana.VoteProgramID) || owner.Equals(solana.MemoProgramID) {
-
-			hs.appLogger.Debug("Filtered out non-EOA owner",
+			owner.Equals(solana.BPFLoaderProgramID) ||
+			owner.Equals(solana.BPFLoaderUpgradeableProgramID) ||
+			owner.Equals(solana.StakeProgramID) ||
+			owner.Equals(solana.VoteProgramID) ||
+			owner.Equals(solana.MemoProgramID) {
+			hs.appLogger.Debug("Skipping non-EOA or filtered owner",
 				zap.String("tokenAccount", tokenAccountAddress.String()),
 				zap.String("owner", owner.String()))
 			continue
