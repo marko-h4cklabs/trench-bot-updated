@@ -203,6 +203,7 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 		}
 
 		accInfo, err := hs.rpcClient.GetAccountInfo(context.Background(), acc.Address)
+		hs.appLogger.Debug("Fetched account info", zap.String("address", acc.Address.String()), zap.Any("data", accInfo.Value.Data))
 		if err != nil || accInfo == nil || accInfo.Value == nil {
 			hs.appLogger.Warn("Skipping account due to failed GetAccountInfo", zap.String("address", acc.Address.String()), zap.Error(err))
 			continue
@@ -226,6 +227,8 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 		}
 
 		ownerStr, ok := info["owner"].(string)
+		hs.appLogger.Debug("Parsed account holder", zap.String("owner", ownerStr), zap.String("amount", acc.Amount))
+
 		if !ok || ownerStr == "" {
 			hs.appLogger.Warn("Owner string missing or invalid", zap.String("address", acc.Address.String()))
 			continue
@@ -254,6 +257,8 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 		result = append(result, HolderInfo{Address: addr, Amount: amt})
 	}
 	sort.Slice(result, func(i, j int) bool {
+		hs.appLogger.Debug("Collected holder map", zap.Any("holders", holders))
+
 		return result[i].Amount > result[j].Amount
 	})
 	if len(result) > numToReturn {
