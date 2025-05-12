@@ -28,7 +28,8 @@ var (
 	NFTCollectionAddress string
 	NFTMinimumHolding    int
 
-	MiniAppURL string // Added for frontend URL
+	HeliusRPCURL string
+	MiniAppURL   string // Added for frontend URL
 
 	PGHOST     string
 	PGPORT     string
@@ -189,6 +190,9 @@ func LoadEnv() error {
 		log.Println("WARN: TRACKING_THREAD_ID is missing or invalid (0). Tracking updates will not be sent to the specific topic.")
 	}
 
+	HeliusRPCURL = loadEnvVariable("HELIUS_RPC_URL", true)
+	if HeliusRPCURL == "" {
+	}
 	log.Println("INFO: Environment variables loading process complete.")
 	return nil
 }

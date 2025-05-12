@@ -34,7 +34,7 @@ func RegisterRoutes(router *gin.Engine, appLogger *logger.Logger) {
 	})
 }
 
-func RegisterAPIRoutes(router *gin.Engine, appLogger *logger.Logger, db *gorm.DB) {
+func RegisterAPIRoutes(router *gin.Engine, appLogger *logger.Logger, db *gorm.DB, heliusSvc *services.HeliusService) {
 	apiGroup := router.Group("/api/v1")
 	{
 		apiGroup.GET("/health", func(c *gin.Context) {
@@ -47,7 +47,7 @@ func RegisterAPIRoutes(router *gin.Engine, appLogger *logger.Logger, db *gorm.DB
 
 		apiGroup.GET("/testHelius", func(c *gin.Context) {
 			appLogger.Info("/api/v1/testHelius endpoint called")
-			TestHeliusConnection(c, appLogger)
+			TestHeliusConnection(c, appLogger, heliusSvc)
 		})
 
 		apiGroup.POST("/webhook", func(c *gin.Context) {
@@ -83,7 +83,7 @@ func RegisterAPIRoutes(router *gin.Engine, appLogger *logger.Logger, db *gorm.DB
 			appLogger.Info("Webhook Payload Received", zap.Int("size", len(body)), requestID)
 			appLogger.Debug("Webhook Payload", zap.ByteString("payload", body), requestID)
 
-			err = services.HandleWebhook(body, appLogger)
+			err = services.HandleWebhook(body, appLogger, heliusSvc)
 			if err != nil {
 				appLogger.Error("Error processing webhook payload in service", zap.Error(err), requestID)
 				c.JSON(http.StatusOK, gin.H{"message": "Webhook received, but processing encountered an error"})
@@ -194,25 +194,23 @@ func handleMarkVerified(appLogger *logger.Logger, botInstance *telego.Bot) gin.H
 	}
 }
 
-func TestHeliusConnection(c *gin.Context, appLogger *logger.Logger) {
+func TestHeliusConnection(c *gin.Context, appLogger *logger.Logger, heliusSvc *services.HeliusService) {
 	appLogger.Info("Executing Helius connection test...")
-	apiKey := env.HeliusAPIKey
-	if apiKey == "" {
-		appLogger.Error("Helius API Key (HELIUS_API_KEY) is missing from env. Cannot perform test.")
-		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Server configuration error: Helius API Key missing."})
+	if heliusSvc == nil {
+		appLogger.Error("HeliusService instance is nil in TestHeliusConnection.")
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Server configuration error: HeliusService not initialized."})
 		return
 	}
 	// Assuming CheckExistingHeliusWebhook exists in services package
-	_, err := services.CheckExistingHeliusWebhook("http://dummy-helius-check.invalid", appLogger)
+	_, err := services.CheckExistingHeliusWebhook("http://dummy-helius-check.invalid", appLogger) // Keep as is for now
 	if err != nil {
-		appLogger.Error("Helius connection test failed.", zap.Error(err))
+		appLogger.Error("Helius connection test (via CheckExistingHeliusWebhook) failed.", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": fmt.Sprintf("Helius connection test failed: %s", err.Error())})
 		return
 	}
-	appLogger.Info("Helius connection test successful (authentication check passed).")
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "Helius connection test successful (authentication check passed)."})
+	appLogger.Info("Helius connection test (via CheckExistingHeliusWebhook) successful.")
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "Helius connection test successful."})
 }
-
 func generateRequestID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
