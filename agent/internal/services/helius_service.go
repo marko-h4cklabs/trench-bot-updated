@@ -207,21 +207,46 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 			hs.appLogger.Warn("Skipping account due to failed GetAccountInfo", zap.String("address", acc.Address.String()), zap.Error(err))
 			continue
 		}
-		owner := accInfo.Value.Owner
-		if (lpValid && owner.Equals(lpPubKey)) || (burnValid && owner.Equals(burnPubKey)) {
-			hs.appLogger.Debug("Skipping known LP or burn owner", zap.String("owner", owner.String()))
+
+		var parsedData map[string]interface{}
+		if err := json.Unmarshal(accInfo.Value.Data.GetRawJSON(), &parsedData); err != nil {
+			hs.appLogger.Warn("Failed to parse JSON from account data", zap.String("address", acc.Address.String()), zap.Error(err))
+			continue
+		}
+		parsed, ok := parsedData["parsed"].(map[string]interface{})
+		if !ok {
+			hs.appLogger.Warn("AccountInfo parsed field is not a map", zap.String("address", acc.Address.String()))
 			continue
 		}
 
-		// 🔍 Log this potential holder even if it's a program account
+		info, ok := parsed["info"].(map[string]interface{})
+		if !ok {
+			hs.appLogger.Warn("AccountInfo info field is not a map", zap.String("address", acc.Address.String()))
+			continue
+		}
+
+		ownerStr, ok := info["owner"].(string)
+		if !ok || ownerStr == "" {
+			hs.appLogger.Warn("Owner string missing or invalid", zap.String("address", acc.Address.String()))
+			continue
+		}
+
+		// Skip known LP or burn owners
+		if lpValid && ownerStr == lpPubKey.String() {
+			continue
+		}
+		if burnValid && ownerStr == burnPubKey.String() {
+			continue
+		}
+
+		// Parse amount
 		amount, err := strconv.ParseUint(acc.Amount, 10, 64)
 		if err != nil {
 			hs.appLogger.Warn("Failed to parse token amount", zap.String("amount", acc.Amount), zap.Error(err))
 			continue
 		}
-		hs.appLogger.Debug("Adding holder candidate", zap.String("account", acc.Address.String()), zap.String("owner", owner.String()), zap.Uint64("amount", amount))
-		holders[owner.String()] += amount
 
+		holders[ownerStr] += amount
 	}
 
 	var result []HolderInfo
