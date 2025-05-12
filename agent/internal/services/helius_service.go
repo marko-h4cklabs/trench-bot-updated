@@ -72,23 +72,43 @@ func (hs *HeliusService) GetTokenSupply(mintAddressStr string) (uint64, error) {
 	return supply, nil
 }
 
-func (hs *HeliusService) GetLPTokensInPair(lpPairAccountAddressStr string, targetTokenMintStr string) (uint64, error) {
-	hs.appLogger.Debug("GetLPTokensInPair: Starting", zap.String("lpPairAccount", lpPairAccountAddressStr), zap.String("targetMint", targetTokenMintStr))
+func (hs *HeliusService) GetLPTokensInPair(lpMintAddressStr string, targetTokenMintStr string) (uint64, error) {
+	hs.appLogger.Debug("GetLPTokensInPair: Starting", zap.String("lpMint", lpMintAddressStr), zap.String("targetMint", targetTokenMintStr))
 
-	lpPairOwnerPubKey, err := solana.PublicKeyFromBase58(lpPairAccountAddressStr)
+	lpMintPubKey, err := solana.PublicKeyFromBase58(lpMintAddressStr)
 	if err != nil {
-		hs.appLogger.Error("Invalid LP pair address", zap.String("lpPairAccount", lpPairAccountAddressStr), zap.Error(err))
-		return 0, fmt.Errorf("invalid LP pair address '%s': %w", lpPairAccountAddressStr, err)
+		hs.appLogger.Error("Invalid LP mint address", zap.String("lpMint", lpMintAddressStr), zap.Error(err))
+		return 0, fmt.Errorf("invalid LP mint address '%s': %w", lpMintAddressStr, err)
 	}
 	targetMintPubKey, err := solana.PublicKeyFromBase58(targetTokenMintStr)
 	if err != nil {
 		hs.appLogger.Error("Invalid target token mint", zap.String("targetMint", targetTokenMintStr), zap.Error(err))
-		return 0, fmt.Errorf("invalid target token mint address '%s': %w", targetTokenMintStr, err)
+		return 0, fmt.Errorf("invalid target token mint '%s': %w", targetTokenMintStr, err)
 	}
 
+	// Step 1: Get largest LP holder
+	lpHolders, err := hs.rpcClient.GetTokenLargestAccounts(context.Background(), lpMintPubKey, rpc.CommitmentFinalized)
+	if err != nil || lpHolders == nil || len(lpHolders.Value) == 0 {
+		hs.appLogger.Error("Failed to fetch largest LP holders", zap.String("lpMint", lpMintAddressStr), zap.Error(err))
+		return 0, fmt.Errorf("failed to fetch largest LP holders: %w", err)
+	}
+
+	lpHolderAccount := lpHolders.Value[0].Address
+	hs.appLogger.Debug("GetLPTokensInPair: Largest LP token holder account", zap.String("account", lpHolderAccount.String()))
+
+	accountInfo, err := hs.rpcClient.GetAccountInfo(context.Background(), lpHolderAccount)
+	if err != nil || accountInfo == nil || accountInfo.Value == nil {
+		hs.appLogger.Error("Failed to get account info for LP holder", zap.String("account", lpHolderAccount.String()), zap.Error(err))
+		return 0, fmt.Errorf("failed to get account info for LP holder: %w", err)
+	}
+
+	lpOwner := accountInfo.Value.Owner
+	hs.appLogger.Debug("GetLPTokensInPair: Owner of largest LP holder", zap.String("owner", lpOwner.String()))
+
+	// Step 2: Get token accounts of LP owner for the target token mint
 	tokenAccountsResult, err := hs.rpcClient.GetTokenAccountsByOwner(
 		context.Background(),
-		lpPairOwnerPubKey,
+		lpOwner,
 		&rpc.GetTokenAccountsConfig{
 			Mint: &targetMintPubKey,
 		},
@@ -103,7 +123,7 @@ func (hs *HeliusService) GetLPTokensInPair(lpPairAccountAddressStr string, targe
 		return 0, fmt.Errorf("failed to fetch token accounts: %w", err)
 	}
 	if len(tokenAccountsResult.Value) == 0 {
-		hs.appLogger.Warn("No token accounts found for LP pair owner and target mint", zap.String("lpOwner", lpPairAccountAddressStr), zap.String("targetMint", targetTokenMintStr))
+		hs.appLogger.Warn("No token accounts found for LP owner and target mint", zap.String("lpOwner", lpOwner.String()), zap.String("targetMint", targetTokenMintStr))
 		return 0, fmt.Errorf("no token accounts found")
 	}
 
