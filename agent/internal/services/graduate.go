@@ -123,73 +123,86 @@ const (
 // or a new `helius_service.go`. They need access to your Helius API key and an HTTP client or Solana RPC client.
 
 func CalculateQualityAndBundling(
-	mintAddressForHelius string,
-	valResult *ValidationResult,
-	heliusSvc *HeliusService, // <-- MODIFIED: Accept HeliusService instance
+	mintAddressForHelius string, // This is the actual mint address of the token being analyzed
+	valResult *ValidationResult, // Contains DexScreener data, including valResult.PairAddress
+	heliusSvc *HeliusService,
 	appLogger *logger.Logger,
 ) (TokenQualityAnalysis, error) {
 	var analysis TokenQualityAnalysis
 	tokenField := zap.String("mintAddress", mintAddressForHelius)
+	appLogger.Debug("CalculateQualityAndBundling: Starting analysis", tokenField, zap.String("dexScreenerPairAddress", valResult.PairAddress))
 
 	if heliusSvc == nil {
 		appLogger.Error("Helius service client is nil in CalculateQualityAndBundling", tokenField)
 		analysis.BundlingInfoString = "--- Holder Concentration ---\n⚠️ Holder analysis service unavailable."
-		analysis.QualityRating = 1 // Or some other way to indicate error
+		analysis.QualityRating = 1
 		return analysis, errors.New("helius service client not available for bundling analysis")
 	}
 
-	totalSupply, err := heliusSvc.GetTokenSupply(mintAddressForHelius) // <-- Use HeliusService method
+	// 1. Get Total Supply
+	totalSupply, err := heliusSvc.GetTokenSupply(mintAddressForHelius)
 	if err != nil || totalSupply == 0 {
 		appLogger.Error("Failed to get total supply or supply is zero for bundling analysis", tokenField, zap.Error(err))
 		analysis.BundlingInfoString = "--- Holder Concentration ---\n⚠️ Holder data unavailable (supply error)."
 		analysis.QualityRating = 1
 		return analysis, fmt.Errorf("failed to get total supply for %s: %w", mintAddressForHelius, err)
 	}
-	lpMintResolved := ""
-	if strings.HasPrefix(valResult.PairAddress, "So11111111111111111111111111111111111111112") {
-		appLogger.Warn("PairAddress appears to be a swap program or SOL system address, skipping LP resolution", tokenField)
-	} else {
-		lpMintResolved, err = heliusSvc.GetMintFromTokenAccount(valResult.PairAddress)
-		if err != nil || lpMintResolved == "" {
-			appLogger.Warn("Could not resolve LP mint from token account", tokenField, zap.String("lpAccount", valResult.PairAddress), zap.Error(err))
-		}
-	}
+	appLogger.Debug("CalculateQualityAndBundling: Fetched total supply", tokenField, zap.Uint64("totalSupply", totalSupply))
 
+	// 2. Get Tokens in LP
 	tokensInLP := uint64(0)
-	if lpMintResolved != "" {
-		tokensInLP, err = heliusSvc.GetLPTokensInPair(lpMintResolved, mintAddressForHelius)
-		if err != nil {
-			appLogger.Warn("Could not determine tokens in LP for bundling analysis", tokenField, zap.Error(err))
-			tokensInLP = 0
-		}
-	}
+	var errLP error
 
-	if err != nil {
-		appLogger.Warn("Could not determine tokens in LP for bundling analysis", tokenField, zap.Error(err))
-		tokensInLP = 0
+	// Directly use valResult.PairAddress as the LP pair address for GetLPTokensInPair.
+	// Only attempt if PairAddress looks like a valid account and not SOL.
+	if valResult.PairAddress != "" && !strings.HasPrefix(valResult.PairAddress, "So11111111111111111111111111111111111111112") {
+		tokensInLP, errLP = heliusSvc.GetLPTokensInPair(valResult.PairAddress, mintAddressForHelius)
+		if errLP != nil {
+			appLogger.Warn("Could not determine tokens in LP for bundling analysis",
+				tokenField,
+				zap.String("lpPairAddressUsed", valResult.PairAddress),
+				zap.Error(errLP))
+			tokensInLP = 0 // Default to 0 if there's an error or none found
+		}
+	} else if valResult.PairAddress == "" {
+		appLogger.Warn("LP PairAddress from DexScreener is empty, cannot fetch LP tokens.", tokenField)
+	} else {
+		appLogger.Info("PairAddress is SOL or a system address, skipping GetLPTokensInPair for LP token calculation.", tokenField, zap.String("pairAddress", valResult.PairAddress))
 	}
+	appLogger.Debug("CalculateQualityAndBundling: Fetched tokens in LP", tokenField, zap.Uint64("tokensInLP", tokensInLP))
+
 	if totalSupply > 0 {
 		analysis.LPTokensPercentOfTotal = (float64(tokensInLP) / float64(totalSupply)) * 100
 	} else {
-		analysis.LPTokensPercentOfTotal = 0
+		analysis.LPTokensPercentOfTotal = 0 // Should be caught by earlier totalSupply check
 	}
+	appLogger.Debug("CalculateQualityAndBundling: LP Tokens Percent of Total", tokenField, zap.Float64("lpPercent", analysis.LPTokensPercentOfTotal))
 
-	solanaBurnAddress := "11111111111111111111111111111111" // Common burn address
-	// Query for more holders initially (e.g., 20) to ensure we have enough EOAs after filtering
-	topEOAHoldersRaw, err := heliusSvc.GetTopEOAHolders(mintAddressForHelius, 20, valResult.PairAddress, solanaBurnAddress) // <-- Use HeliusService method
+	// 3. Get Top EOA Holders
+	solanaBurnAddress := "11111111111111111111111111111111"
+	// Pass valResult.PairAddress as the lpPairAddressToExclude to GetTopEOAHolders
+	topEOAHoldersRaw, err := heliusSvc.GetTopEOAHolders(mintAddressForHelius, 20, valResult.PairAddress, solanaBurnAddress)
 
+	// Calculate circulating supply for EOA percentage calculation
+	// (Total Supply - Tokens in the specific LP we are analyzing)
 	circulatingSupplyForEOAs := float64(totalSupply - tokensInLP)
+	appLogger.Debug("CalculateQualityAndBundling: Calculated circulatingSupplyForEOAs (Total - This LP)", tokenField, zap.Float64("circSupplyForEOAPerc", circulatingSupplyForEOAs))
 
 	if err != nil {
 		appLogger.Warn("Failed to get top EOA holders", tokenField, zap.Error(err))
+		// Still format the LP part if it was successful
 		analysis.BundlingInfoString = fmt.Sprintf("--- Holder Concentration ---\n⚠️ EOA holder data unavailable.\n💧 LP Pool Tokens: %.2f%% of Total", analysis.LPTokensPercentOfTotal)
+		// Set EOA percentages to 0 or handle as error in rating
+		analysis.Top1HolderEOAPercent = -1 // Use -1 to indicate data error for rating logic
+		analysis.Top5HolderEOAPercent = -1
 	} else {
-		// Recalculate percentages for the actual EOA holders based on circulating EOA supply
 		var processedEOAHolders []HolderInfo
 		for _, rawHolder := range topEOAHoldersRaw {
 			var perc float64
-			if circulatingSupplyForEOAs > 0 {
+			if circulatingSupplyForEOAs > 0 { // Avoid division by zero
 				perc = (float64(rawHolder.Amount) / circulatingSupplyForEOAs) * 100
+			} else if rawHolder.Amount > 0 { // If circ supply is 0 but holder has amount, means all is with this holder (edge case)
+				perc = 100.0 // Or handle as error/special case
 			}
 			processedEOAHolders = append(processedEOAHolders, HolderInfo{
 				Address:    rawHolder.Address,
@@ -197,93 +210,114 @@ func CalculateQualityAndBundling(
 				Percentage: perc,
 			})
 		}
-		// Ensure processedEOAHolders is sorted by Percentage or Amount if GetTopEOAHolders doesn't guarantee final sort after EOA filtering
-		// For simplicity, assume GetTopEOAHolders already returns sorted EOA list by amount.
+		// GetTopEOAHolders should already return sorted by amount.
+		// We are using the percentages calculated here.
 
 		if len(processedEOAHolders) > 0 {
 			analysis.Top1HolderEOAPercent = processedEOAHolders[0].Percentage
+		} else {
+			analysis.Top1HolderEOAPercent = 0
 		}
+
 		top5CombinedPercent := 0.0
 		for i := 0; i < len(processedEOAHolders) && i < 5; i++ {
 			top5CombinedPercent += processedEOAHolders[i].Percentage
 		}
 		analysis.Top5HolderEOAPercent = top5CombinedPercent
 
-		// Update bundling string with calculated percentages
 		analysis.BundlingInfoString = fmt.Sprintf(
 			"--- Holder Concentration ---\n"+
 				"📈 Top 1 Holder (EOA): %.2f%%\n"+
-				"📊 Top 5 Holders (EOA): %.2f%%\n"+ // This is now sum of top 5 percentages
+				"📊 Top 5 Holders (EOA): %.2f%%\n"+
 				"💧 LP Pool Tokens: %.2f%% of Total",
-			analysis.Top1HolderEOAPercent, analysis.Top5HolderEOAPercent, analysis.LPTokensPercentOfTotal,
+			analysis.Top1HolderEOAPercent,
+			analysis.Top5HolderEOAPercent,
+			analysis.LPTokensPercentOfTotal,
 		)
 	}
+	appLogger.Debug("CalculateQualityAndBundling: Generated BundlingInfoString", tokenField, zap.String("bundlingInfo", analysis.BundlingInfoString))
+	appLogger.Debug("CalculateQualityAndBundling: EOA Percentages for rating", tokenField, zap.Float64("top1EOA%", analysis.Top1HolderEOAPercent), zap.Float64("top5EOA%", analysis.Top5HolderEOAPercent))
 
-	appLogger.Info("Debugging LP and EOA holder results",
-		tokenField,
-		zap.String("resolvedLPMint", lpMintResolved),
-		zap.Uint64("tokensInLP", tokensInLP),
-		zap.Float64("top1EOA%", analysis.Top1HolderEOAPercent),
-		zap.Float64("top5EOA%", analysis.Top5HolderEOAPercent),
-	)
-
-	// --- Rating Calculation Logic (Same as before) ---
+	// --- Rating Calculation Logic ---
 	currentRating := BASE_RATING
+
+	// Penalties from DexScreener data
 	if (valResult.Volume1h < valResult.Volume5m*RATING_STAGNATION_GROWTH_FACTOR) && (float64(valResult.Txns1h) < float64(valResult.Txns5m)*RATING_STAGNATION_GROWTH_FACTOR) {
 		if !(valResult.Volume5m == 0 && valResult.Txns5m == 0) {
 			currentRating -= RATING_STAGNATION_PENALTY
+			appLogger.Debug("Rating: Applied Stagnation Penalty", tokenField, zap.Float64("penalty", RATING_STAGNATION_PENALTY), zap.Float64("newRating", currentRating))
 		}
 	}
 	if (valResult.Txns5m > RATING_HIGH_TXN_THRESHOLD) && (float64(valResult.Txns1h) < float64(valResult.Txns5m)*RATING_HIGH_TXN_LOW_GROWTH_FACTOR) {
 		currentRating -= RATING_HIGH_TXN_LOW_GROWTH_PENALTY
+		appLogger.Debug("Rating: Applied High TXN Low Growth Penalty", tokenField, zap.Float64("penalty", RATING_HIGH_TXN_LOW_GROWTH_PENALTY), zap.Float64("newRating", currentRating))
 	}
 	if (valResult.Txns5m >= RATING_MODERATE_TXN_LOWER_BOUND && valResult.Txns5m <= RATING_MODERATE_TXN_UPPER_BOUND) && (float64(valResult.Txns1h) < float64(valResult.Txns5m)*RATING_MODERATE_TXN_LOW_GROWTH_FACTOR) {
 		currentRating -= RATING_MOD_TXN_LOW_GROWTH_PENALTY
+		appLogger.Debug("Rating: Applied Moderate TXN Low Growth Penalty", tokenField, zap.Float64("penalty", RATING_MOD_TXN_LOW_GROWTH_PENALTY), zap.Float64("newRating", currentRating))
 	}
 	if valResult.LiquidityUSD > 0 {
 		if (valResult.Volume5m/valResult.LiquidityUSD > RATING_VOL_LIQ_IMBALANCE_RATIO_THRESHOLD) && (valResult.MarketCap < (LOCAL_RATING_MIN_MARKETCAP * RATING_MIN_MC_MULTIPLIER_FOR_VOL_LIQ)) {
 			currentRating -= RATING_VOL_LIQ_LOW_MC_PENALTY
+			appLogger.Debug("Rating: Applied Vol/Liq Low MC Penalty", tokenField, zap.Float64("penalty", RATING_VOL_LIQ_LOW_MC_PENALTY), zap.Float64("newRating", currentRating))
 		}
 	}
 	if valResult.LiquidityUSD > RATING_HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK {
 		if valResult.MarketCap < (valResult.LiquidityUSD * RATING_MIN_MC_TO_HIGH_LIQ_RATIO) {
 			currentRating -= RATING_HIGH_LIQ_LOW_MC_PENALTY
+			appLogger.Debug("Rating: Applied High Liq Low MC Penalty", tokenField, zap.Float64("penalty", RATING_HIGH_LIQ_LOW_MC_PENALTY), zap.Float64("newRating", currentRating))
 		}
 	}
 	if valResult.Txns5m >= RATING_MIN_TX_FOR_BS_RATING_CHECK && valResult.Txns5m > 0 {
 		buyRatio5m := float64(valResult.Txns5mBuys) / float64(valResult.Txns5m)
 		if buyRatio5m > RATING_BS_IMBALANCE_MODERATE_THRESHOLD || (1.0-buyRatio5m) > RATING_BS_IMBALANCE_MODERATE_THRESHOLD {
 			currentRating -= RATING_BS_IMBALANCE_MODERATE_PENALTY
+			appLogger.Debug("Rating: Applied 5m B/S Imbalance Moderate Penalty", tokenField, zap.Float64("penalty", RATING_BS_IMBALANCE_MODERATE_PENALTY), zap.Float64("newRating", currentRating))
 		}
 	}
 	if valResult.Txns1h >= RATING_MIN_TX_FOR_BS_RATING_CHECK && valResult.Txns1h > 0 {
 		buyRatio1h := float64(valResult.Txns1hBuys) / float64(valResult.Txns1h)
 		if buyRatio1h > RATING_BS_IMBALANCE_MODERATE_THRESHOLD || (1.0-buyRatio1h) > RATING_BS_IMBALANCE_MODERATE_THRESHOLD {
 			currentRating -= RATING_BS_IMBALANCE_MODERATE_PENALTY
+			appLogger.Debug("Rating: Applied 1h B/S Imbalance Moderate Penalty", tokenField, zap.Float64("penalty", RATING_BS_IMBALANCE_MODERATE_PENALTY), zap.Float64("newRating", currentRating))
 		}
 	}
-	if analysis.Top1HolderEOAPercent > 0 {
+
+	// Penalties/Bonuses from Holder Analysis
+	// Only apply if Top1HolderEOAPercent is not the error indicator -1
+	if analysis.Top1HolderEOAPercent >= 0 {
 		if analysis.Top1HolderEOAPercent > HOLDER_TOP1_EXTREME_THRESHOLD {
 			currentRating -= RATING_EXTREME_TOP_1_HOLDER_PENALTY
+			appLogger.Debug("Rating: Applied Extreme Top 1 Holder Penalty", tokenField, zap.Float64("penalty", RATING_EXTREME_TOP_1_HOLDER_PENALTY), zap.Float64("newRating", currentRating))
 		} else if analysis.Top1HolderEOAPercent > HOLDER_TOP1_HIGH_THRESHOLD {
 			currentRating -= RATING_HIGH_TOP_1_HOLDER_PENALTY
+			appLogger.Debug("Rating: Applied High Top 1 Holder Penalty", tokenField, zap.Float64("penalty", RATING_HIGH_TOP_1_HOLDER_PENALTY), zap.Float64("newRating", currentRating))
 		}
 	}
-	if analysis.Top5HolderEOAPercent > 0 {
+	if analysis.Top5HolderEOAPercent >= 0 { // Ensure data was available
 		if analysis.Top5HolderEOAPercent > HOLDER_TOP5_EXTREME_THRESHOLD {
 			currentRating -= RATING_EXTREME_TOP_5_HOLDERS_PENALTY
+			appLogger.Debug("Rating: Applied Extreme Top 5 Holder Penalty", tokenField, zap.Float64("penalty", RATING_EXTREME_TOP_5_HOLDERS_PENALTY), zap.Float64("newRating", currentRating))
 		} else if analysis.Top5HolderEOAPercent > HOLDER_TOP5_HIGH_THRESHOLD {
 			currentRating -= RATING_HIGH_TOP_5_HOLDERS_PENALTY
+			appLogger.Debug("Rating: Applied High Top 5 Holder Penalty", tokenField, zap.Float64("penalty", RATING_HIGH_TOP_5_HOLDERS_PENALTY), zap.Float64("newRating", currentRating))
 		}
 	}
-	if analysis.Top1HolderEOAPercent > 0 && analysis.Top1HolderEOAPercent < HOLDER_LOW_CONC_TOP1_MAX &&
-		analysis.Top5HolderEOAPercent > 0 && analysis.Top5HolderEOAPercent < HOLDER_LOW_CONC_TOP5_MAX {
+	// Bonus for low concentration only if data was available and meets criteria
+	if analysis.Top1HolderEOAPercent >= 0 && analysis.Top1HolderEOAPercent < HOLDER_LOW_CONC_TOP1_MAX &&
+		analysis.Top5HolderEOAPercent >= 0 && analysis.Top5HolderEOAPercent < HOLDER_LOW_CONC_TOP5_MAX {
 		currentRating += RATING_LOW_CONCENTRATION_BONUS
+		appLogger.Debug("Rating: Applied Low Concentration Bonus", tokenField, zap.Float64("bonus", RATING_LOW_CONCENTRATION_BONUS), zap.Float64("newRating", currentRating))
 	}
+
+	// Bonuses for strong growth (from DexScreener data)
 	if valResult.Volume5m > 0 && (valResult.Volume1h/valResult.Volume5m) >= 2.5 &&
 		valResult.Txns5m > 0 && (float64(valResult.Txns1h)/float64(valResult.Txns5m)) >= 2.0 {
 		currentRating += RATING_STRONG_GROWTH_BONUS
+		appLogger.Debug("Rating: Applied Strong Growth Bonus", tokenField, zap.Float64("bonus", RATING_STRONG_GROWTH_BONUS), zap.Float64("newRating", currentRating))
 	}
+
+	// Clamp rating
 	if currentRating < 1.0 {
 		currentRating = 1.0
 	}
@@ -291,6 +325,7 @@ func CalculateQualityAndBundling(
 		currentRating = 5.0
 	}
 	analysis.QualityRating = int(math.Round(currentRating))
+	appLogger.Info("CalculateQualityAndBundling: Final Calculated Quality Rating", tokenField, zap.Int("rating", analysis.QualityRating), zap.Float64("floatRatingBeforeRounding", currentRating))
 
 	return analysis, nil
 }
