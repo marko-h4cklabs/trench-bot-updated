@@ -163,100 +163,109 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 
 	mintPubKey, err := solana.PublicKeyFromBase58(mintAddressStr)
 	if err != nil {
-		hs.appLogger.Error("Invalid mint address", zap.String("mint", mintAddressStr), zap.Error(err))
+		hs.appLogger.Error("GetTopEOAHolders: Invalid mint address", zap.String("mint", mintAddressStr), zap.Error(err))
 		return nil, fmt.Errorf("invalid mint address: %w", err)
 	}
 
 	var lpPubKey, burnPubKey solana.PublicKey
 	lpValid, burnValid := false, false
 	if lpPairAddressStr != "" {
-		if pk, err := solana.PublicKeyFromBase58(lpPairAddressStr); err == nil {
+		if pk, errLP := solana.PublicKeyFromBase58(lpPairAddressStr); errLP == nil {
 			lpPubKey, lpValid = pk, true
+		} else {
+			hs.appLogger.Warn("GetTopEOAHolders: Invalid LP Pair address string for exclusion", zap.String("lpPair", lpPairAddressStr), zap.Error(errLP))
 		}
 	}
 	if knownBurnAddressStr != "" {
-		if pk, err := solana.PublicKeyFromBase58(knownBurnAddressStr); err == nil {
+		if pk, errBurn := solana.PublicKeyFromBase58(knownBurnAddressStr); errBurn == nil {
 			burnPubKey, burnValid = pk, true
+		} else {
+			hs.appLogger.Warn("GetTopEOAHolders: Invalid Burn address string for exclusion", zap.String("burnAddr", knownBurnAddressStr), zap.Error(errBurn))
 		}
 	}
 
 	largestAccounts, err := hs.rpcClient.GetTokenLargestAccounts(context.Background(), mintPubKey, rpc.CommitmentFinalized)
 	if err != nil {
-		hs.appLogger.Error("RPC GetTokenLargestAccounts failed", zap.String("mint", mintAddressStr), zap.Error(err))
+		hs.appLogger.Error("GetTopEOAHolders: RPC GetTokenLargestAccounts failed", zap.String("mint", mintAddressStr), zap.Error(err))
 		return nil, fmt.Errorf("GetTokenLargestAccounts failed: %w", err)
 	}
 	if largestAccounts == nil || largestAccounts.Value == nil {
-		hs.appLogger.Warn("No largest accounts returned", zap.String("mint", mintAddressStr))
-		return nil, fmt.Errorf("no largest accounts found")
+		hs.appLogger.Warn("GetTopEOAHolders: No largest accounts returned by RPC", zap.String("mint", mintAddressStr))
+		return []HolderInfo{}, nil // Return empty, not an error
 	}
 
-	hs.appLogger.Debug("Fetched largest accounts", zap.Int("count", len(largestAccounts.Value)))
+	hs.appLogger.Debug("GetTopEOAHolders: Fetched largest token accounts", zap.Int("count", len(largestAccounts.Value)))
 
-	holders := make(map[string]uint64)
-	initialQueryLimit := numToReturn + 25
-	for i, acc := range largestAccounts.Value {
-		if len(holders) >= numToReturn && i >= numToReturn {
+	holders := make(map[string]uint64)    // EOA Owner Address -> Aggregated Amount
+	initialQueryLimit := numToReturn + 25 // Fetch more initially to account for filtering
+	processedAccountCount := 0
+
+	for _, accRpcInfo := range largestAccounts.Value {
+		if len(holders) >= numToReturn && processedAccountCount >= numToReturn { // Stop if we have enough distinct EOAs
+			hs.appLogger.Debug("GetTopEOAHolders: Reached desired number of EOA holders", zap.Int("found", len(holders)))
 			break
 		}
-		if i >= initialQueryLimit {
+		if processedAccountCount >= initialQueryLimit { // Hard stop after processing a certain number
+			hs.appLogger.Debug("GetTopEOAHolders: Reached initial query limit for processing", zap.Int("processed", processedAccountCount))
 			break
 		}
+		processedAccountCount++
 
-		accInfo, err := hs.rpcClient.GetAccountInfo(context.Background(), acc.Address)
-		hs.appLogger.Debug("Fetched account info", zap.String("address", acc.Address.String()), zap.Any("data", accInfo.Value.Data))
-		if err != nil || accInfo == nil || accInfo.Value == nil {
-			hs.appLogger.Warn("Skipping account due to failed GetAccountInfo", zap.String("address", acc.Address.String()), zap.Error(err))
-			continue
-		}
+		tokenAccountAddress := accRpcInfo.Address // This is the Token Account Address
+		hs.appLogger.Debug("GetTopEOAHolders: Processing token account", zap.String("tokenAccount", tokenAccountAddress.String()), zap.String("rawAmount", accRpcInfo.Amount))
 
-		rawJson := accInfo.Value.Data.GetRawJSON()
-		if len(rawJson) == 0 || string(rawJson) == "null" {
-			hs.appLogger.Warn("Empty or null raw JSON from account data", zap.String("address", acc.Address.String()))
-			continue
-		}
-
-		var parsedData map[string]interface{}
-		if err := json.Unmarshal(rawJson, &parsedData); err != nil {
-			hs.appLogger.Warn("Failed to parse JSON from account data", zap.String("address", acc.Address.String()), zap.ByteString("rawJson", rawJson), zap.Error(err))
-			continue
-		}
-
-		parsed, ok := parsedData["parsed"].(map[string]interface{})
-		if !ok {
-			hs.appLogger.Warn("AccountInfo parsed field is not a map", zap.String("address", acc.Address.String()))
-			continue
-		}
-
-		info, ok := parsed["info"].(map[string]interface{})
-		if !ok {
-			hs.appLogger.Warn("AccountInfo info field is not a map", zap.String("address", acc.Address.String()))
-			continue
-		}
-
-		ownerStr, ok := info["owner"].(string)
-		hs.appLogger.Debug("Parsed account holder", zap.String("owner", ownerStr), zap.String("amount", acc.Amount))
-
-		if !ok || ownerStr == "" {
-			hs.appLogger.Warn("Owner string missing or invalid", zap.String("address", acc.Address.String()))
-			continue
-		}
-
-		// Skip known LP or burn owners
-		if lpValid && ownerStr == lpPubKey.String() {
-			continue
-		}
-		if burnValid && ownerStr == burnPubKey.String() {
-			continue
-		}
-
-		// Parse amount
-		amount, err := strconv.ParseUint(acc.Amount, 10, 64)
+		accInfo, err := hs.rpcClient.GetAccountInfo(context.Background(), tokenAccountAddress)
 		if err != nil {
-			hs.appLogger.Warn("Failed to parse token amount", zap.String("amount", acc.Amount), zap.Error(err))
+			hs.appLogger.Warn("GetTopEOAHolders: Skipping account due to failed GetAccountInfo", zap.String("tokenAccount", tokenAccountAddress.String()), zap.Error(err))
+			continue
+		}
+		if accInfo == nil || accInfo.Value == nil {
+			hs.appLogger.Warn("GetTopEOAHolders: Skipping account due to nil AccountInfo.Value", zap.String("tokenAccount", tokenAccountAddress.String()))
 			continue
 		}
 
-		holders[ownerStr] += amount
+		owner := accInfo.Value.Owner // This is the actual owner (EOA or Program)
+
+		// Filter out LP, Burn, and common Program addresses
+		if (lpValid && owner.Equals(lpPubKey)) || (burnValid && owner.Equals(burnPubKey)) ||
+			owner.Equals(solana.TokenProgramID) || owner.Equals(solana.SystemProgramID) ||
+			owner.Equals(solana.SPLAssociatedTokenAccountProgramID) ||
+			owner.Equals(solana.BPFLoaderProgramID) || owner.Equals(solana.BPFLoaderUpgradeableProgramID) ||
+			owner.Equals(solana.StakeProgramID) || owner.Equals(solana.VoteProgramID) || owner.Equals(solana.MemoProgramID) {
+			hs.appLogger.Debug("GetTopEOAHolders: Skipping non-EOA or filtered owner", zap.String("tokenAccount", tokenAccountAddress.String()), zap.String("owner", owner.String()))
+			continue
+		}
+
+		// Now, try to parse the account data to confirm it's a token account and get owner (if needed, though owner is from accInfo.Value.Owner)
+		// The main goal here would be if we needed other info from the parsed data.
+		// For just getting owner, accInfo.Value.Owner is enough.
+		// The "unexpected end of JSON input" error happened when unmarshalling `accInfo.Value.Data.GetRawJSON()`
+
+		// Let's log the raw data that caused issues
+		if accInfo.Value.Data == nil {
+			hs.appLogger.Warn("GetTopEOAHolders: accInfo.Value.Data is nil, cannot parse owner for filtering", zap.String("tokenAccount", tokenAccountAddress.String()))
+			continue
+		}
+
+		// Check encoding of this specific account if it helps debugging
+		hs.appLogger.Debug("GetTopEOAHolders: Account data type",
+			zap.String("tokenAccount", tokenAccountAddress.String()),
+			zap.String("dataType", fmt.Sprintf("%T", accInfo.Value.Data)),
+		)
+
+		// For GetTopEOAHolders, we primarily need the owner, which we got from accInfo.Value.Owner.
+		// The parsing of accInfo.Value.Data here was more for robustly confirming it IS a token account,
+		// but if we trust that `GetTokenLargestAccounts` gives us token accounts, and `accInfo.Value.Owner` is an EOA (after filtering),
+		// we might not need to re-parse `accInfo.Value.Data` just to confirm owner again.
+		// The critical part is that `accInfo.Value.Owner` is correct.
+
+		amount, err := strconv.ParseUint(accRpcInfo.Amount, 10, 64) // Amount is from GetTokenLargestAccounts
+		if err != nil {
+			hs.appLogger.Warn("GetTopEOAHolders: Failed to parse token amount for potential EOA", zap.String("amountStr", accRpcInfo.Amount), zap.Error(err))
+			continue
+		}
+		holders[owner.String()] += amount
+		hs.appLogger.Debug("GetTopEOAHolders: Aggregated for EOA", zap.String("eoaOwner", owner.String()), zap.Uint64("aggregatedAmount", holders[owner.String()]))
 	}
 
 	var result []HolderInfo
@@ -264,14 +273,12 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 		result = append(result, HolderInfo{Address: addr, Amount: amt})
 	}
 	sort.Slice(result, func(i, j int) bool {
-		hs.appLogger.Debug("Collected holder map", zap.Any("holders", holders))
-
 		return result[i].Amount > result[j].Amount
 	})
 	if len(result) > numToReturn {
 		result = result[:numToReturn]
 	}
 
-	hs.appLogger.Info("Top EOA holders fetched", zap.Int("returned", len(result)), zap.String("mint", mintAddressStr))
+	hs.appLogger.Info("GetTopEOAHolders: Top EOA holders fetched", zap.Int("returnedCount", len(result)), zap.String("mint", mintAddressStr))
 	return result, nil
 }
