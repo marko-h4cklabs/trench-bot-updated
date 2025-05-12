@@ -212,16 +212,16 @@ func (hs *HeliusService) GetTopEOAHolders(mintAddressStr string, numToReturn int
 			hs.appLogger.Debug("Skipping known LP or burn owner", zap.String("owner", owner.String()))
 			continue
 		}
-		if owner.Equals(solana.TokenProgramID) || owner.Equals(solana.SystemProgramID) || owner.Equals(solana.SPLAssociatedTokenAccountProgramID) {
-			hs.appLogger.Debug("Skipping system/program account", zap.String("owner", owner.String()))
-			continue
-		}
+
+		// 🔍 Log this potential holder even if it's a program account
 		amount, err := strconv.ParseUint(acc.Amount, 10, 64)
 		if err != nil {
 			hs.appLogger.Warn("Failed to parse token amount", zap.String("amount", acc.Amount), zap.Error(err))
 			continue
 		}
+		hs.appLogger.Debug("Adding holder candidate", zap.String("account", acc.Address.String()), zap.String("owner", owner.String()), zap.Uint64("amount", amount))
 		holders[owner.String()] += amount
+
 	}
 
 	var result []HolderInfo
