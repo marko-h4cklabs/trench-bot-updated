@@ -204,7 +204,7 @@ func TestHeliusConnection(c *gin.Context, appLogger *logger.Logger, heliusSvc *s
 	// Assuming CheckExistingHeliusWebhook exists in services package
 	_, err := services.CheckExistingHeliusWebhook("http://dummy-helius-check.invalid", appLogger) // Keep as is for now
 	if err != nil {
-		appLogger.Error("Helius connection test (via CheckExistingHeliusWebhook) failed.", zap.Error(err))
+		appLogger.Error("Helius... connection test (via CheckExistingHeliusWebhook) failed.", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": fmt.Sprintf("Helius connection test failed: %s", err.Error())})
 		return
 	}
