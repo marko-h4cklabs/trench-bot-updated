@@ -5,9 +5,8 @@ import (
 	"ca-scraper/agent/internal/events"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
-	"ca-scraper/shared/notifications" // Keep context for potential future use in Helius helpers
+	"ca-scraper/shared/notifications"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -18,11 +17,12 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	// If using gagliardetto/solana-go for Helius RPC helpers, add imports:
+	// No direct Helius RPC client imports needed in this file anymore
 	// "github.com/gagliardetto/solana-go"
 	// "github.com/gagliardetto/solana-go/rpc"
 )
 
+// Structs (TrackedTokenInfo, WebhookRequest, tokenCache, GraduatedTokenCache) - Unchanged
 type TrackedTokenInfo struct {
 	BaselineMarketCap           float64
 	HighestMarketCapSeen        float64
@@ -56,27 +56,20 @@ type GraduatedTokenCache struct {
 
 var graduatedTokenCache = &GraduatedTokenCache{Data: make(map[string]time.Time)}
 
-// HolderInfo and TokenQualityAnalysis structs
-type HolderInfo struct {
-	Address    string
-	Amount     uint64  // Raw amount of tokens
-	Percentage float64 // Percentage of *circulating EOA supply*
-}
+// REMOVED HolderInfo struct
 
+// TokenQualityAnalysis - MODIFIED: Removed fields related to bundling
 type TokenQualityAnalysis struct {
-	QualityRating          int    // 1-5
-	BundlingInfoString     string // Formatted string for Telegram
-	Top1HolderEOAPercent   float64
-	Top5HolderEOAPercent   float64
-	LPTokensPercentOfTotal float64 // Percentage of LP tokens relative to total supply
+	QualityRating int // 1-5
+	// BundlingInfoString     string // REMOVED
+	// Top1HolderEOAPercent   float64 // REMOVED
+	// Top5HolderEOAPercent   float64 // REMOVED
+	// LPTokensPercentOfTotal float64 // REMOVED
 }
 
-// Constants for Rating Logic
-// In agent/internal/services/graduate.go
-
+// Constants for Rating Logic - MODIFIED: Removed Holder-specific constants
 const (
-	// Rating Penalties/Bonuses
-	BASE_RATING = 3.0 // Added this as it was used but not defined as const
+	BASE_RATING = 3.0
 
 	RATING_STAGNATION_PENALTY            = 1.0
 	RATING_HIGH_TXN_LOW_GROWTH_PENALTY   = 0.75
@@ -84,161 +77,40 @@ const (
 	RATING_VOL_LIQ_LOW_MC_PENALTY        = 0.75
 	RATING_HIGH_LIQ_LOW_MC_PENALTY       = 0.75
 	RATING_BS_IMBALANCE_MODERATE_PENALTY = 0.5
-
-	RATING_EXTREME_TOP_1_HOLDER_PENALTY  = 1.5
-	RATING_HIGH_TOP_1_HOLDER_PENALTY     = 1.0
-	RATING_EXTREME_TOP_5_HOLDERS_PENALTY = 1.0
-	RATING_HIGH_TOP_5_HOLDERS_PENALTY    = 0.5
 	RATING_STRONG_GROWTH_BONUS           = 0.75
-	RATING_LOW_CONCENTRATION_BONUS       = 0.5
+	// RATING_LOW_CONCENTRATION_BONUS       = 0.5 // REMOVED
 
-	// Thresholds used *within* rating logic
 	RATING_STAGNATION_GROWTH_FACTOR              = 1.15
-	RATING_HIGH_TXN_THRESHOLD                    = 2000 // This is from dexscreener.go, ensure consistency or pass as param
+	RATING_HIGH_TXN_THRESHOLD                    = 2000
 	RATING_HIGH_TXN_LOW_GROWTH_FACTOR            = 1.30
-	RATING_MODERATE_TXN_LOWER_BOUND              = 700  // This is from dexscreener.go
-	RATING_MODERATE_TXN_UPPER_BOUND              = 1999 // This is from dexscreener.go
+	RATING_MODERATE_TXN_LOWER_BOUND              = 700
+	RATING_MODERATE_TXN_UPPER_BOUND              = 1999
 	RATING_MODERATE_TXN_LOW_GROWTH_FACTOR        = 1.40
 	RATING_VOL_LIQ_IMBALANCE_RATIO_THRESHOLD     = 5.0
 	RATING_MIN_MC_MULTIPLIER_FOR_VOL_LIQ         = 1.75
 	RATING_HIGH_LIQUIDITY_THRESHOLD_FOR_MC_CHECK = 90000.0
 	RATING_MIN_MC_TO_HIGH_LIQ_RATIO              = 1.10
-
-	// ***** THESE WERE MISSING *****
-	HOLDER_TOP1_EXTREME_THRESHOLD = 35.0 // Top 1 EOA > 35%
-	HOLDER_TOP1_HIGH_THRESHOLD    = 20.0 // Top 1 EOA > 20%
-	HOLDER_TOP5_EXTREME_THRESHOLD = 55.0 // Top 5 EOAs > 55%
-	HOLDER_TOP5_HIGH_THRESHOLD    = 40.0 // Top 5 EOAs > 40%
-	HOLDER_LOW_CONC_TOP1_MAX      = 5.0  // Bonus if Top 1 EOA < 5%
-	HOLDER_LOW_CONC_TOP5_MAX      = 15.0 // Bonus if Top 5 EOAs < 15% (and Top 1 also low)
-	// ***** END OF MISSING CONSTANTS *****
-	LOCAL_RATING_MIN_MARKETCAP             = 80000.0
+	// REMOVED HOLDER_*_THRESHOLD constants
+	LOCAL_RATING_MIN_MARKETCAP             = 80000.0 // Ensure this aligns with dexscreener.go's minMarketCap
 	RATING_BS_IMBALANCE_MODERATE_THRESHOLD = 0.80
 	RATING_MIN_TX_FOR_BS_RATING_CHECK      = 50
 )
 
-// --- Helius RPC Helper Function Placeholders ---
-// YOU MUST IMPLEMENT THESE WITH ACTUAL HELIUS RPC CALLS
-// These functions would ideally live in your existing `solana.go` (if it has HeliusRPCRequest)
-// or a new `helius_service.go`. They need access to your Helius API key and an HTTP client or Solana RPC client.
+// REMOVED Helius Helper Function Stubs (GetTokenSupply, GetLPTokensForPair, GetTopEOAHolders)
 
-func CalculateQualityAndBundling(
-	mintAddressForHelius string, // This is the actual mint address of the token being analyzed
-	valResult *ValidationResult, // Contains DexScreener data, including valResult.PairAddress
-	heliusSvc *HeliusService,
+// CalculateQualityRating (Renamed, no longer accepts HeliusService or mintAddressForHelius for Helius calls)
+func CalculateQualityRating(
+	valResult *ValidationResult, // Contains all DexScreener metrics
 	appLogger *logger.Logger,
-) (TokenQualityAnalysis, error) {
+) TokenQualityAnalysis { // No error returned if it's just rating
 	var analysis TokenQualityAnalysis
-	tokenField := zap.String("mintAddress", mintAddressForHelius)
-	appLogger.Debug("CalculateQualityAndBundling: Starting analysis", tokenField, zap.String("dexScreenerPairAddress", valResult.PairAddress))
-
-	if heliusSvc == nil {
-		appLogger.Error("Helius service client is nil in CalculateQualityAndBundling", tokenField)
-		analysis.BundlingInfoString = "--- Holder Concentration ---\n⚠️ Holder analysis service unavailable."
-		analysis.QualityRating = 1
-		return analysis, errors.New("helius service client not available for bundling analysis")
+	tokenField := zap.String("mintAddress", valResult.TokenName) // Or better, use valResult.PairAddress or a dedicated mint field
+	if valResult.TokenName == "" || valResult.TokenName == "N/A" {
+		tokenField = zap.String("pairAddressForContext", valResult.PairAddress) // Fallback for logging if name is bad
 	}
+	appLogger.Debug("CalculateQualityRating: Starting rating based on DexScreener data", tokenField)
 
-	// 1. Get Total Supply
-	totalSupply, err := heliusSvc.GetTokenSupply(mintAddressForHelius)
-	if err != nil || totalSupply == 0 {
-		appLogger.Error("Failed to get total supply or supply is zero for bundling analysis", tokenField, zap.Error(err))
-		analysis.BundlingInfoString = "--- Holder Concentration ---\n⚠️ Holder data unavailable (supply error)."
-		analysis.QualityRating = 1
-		return analysis, fmt.Errorf("failed to get total supply for %s: %w", mintAddressForHelius, err)
-	}
-	appLogger.Debug("CalculateQualityAndBundling: Fetched total supply", tokenField, zap.Uint64("totalSupply", totalSupply))
-
-	// 2. Get Tokens in LP
-	tokensInLP := uint64(0)
-	var errLP error
-
-	// Directly use valResult.PairAddress as the LP pair address for GetLPTokensInPair.
-	// Only attempt if PairAddress looks like a valid account and not SOL.
-	if valResult.PairAddress != "" && !strings.HasPrefix(valResult.PairAddress, "So11111111111111111111111111111111111111112") {
-		tokensInLP, errLP = heliusSvc.GetLPTokensInPair(valResult.PairAddress, mintAddressForHelius)
-		if errLP != nil {
-			appLogger.Warn("Could not determine tokens in LP for bundling analysis",
-				tokenField,
-				zap.String("lpPairAddressUsed", valResult.PairAddress),
-				zap.Error(errLP))
-			tokensInLP = 0 // Default to 0 if there's an error or none found
-		}
-	} else if valResult.PairAddress == "" {
-		appLogger.Warn("LP PairAddress from DexScreener is empty, cannot fetch LP tokens.", tokenField)
-	} else {
-		appLogger.Info("PairAddress is SOL or a system address, skipping GetLPTokensInPair for LP token calculation.", tokenField, zap.String("pairAddress", valResult.PairAddress))
-	}
-	appLogger.Debug("CalculateQualityAndBundling: Fetched tokens in LP", tokenField, zap.Uint64("tokensInLP", tokensInLP))
-
-	if totalSupply > 0 {
-		analysis.LPTokensPercentOfTotal = (float64(tokensInLP) / float64(totalSupply)) * 100
-	} else {
-		analysis.LPTokensPercentOfTotal = 0 // Should be caught by earlier totalSupply check
-	}
-	appLogger.Debug("CalculateQualityAndBundling: LP Tokens Percent of Total", tokenField, zap.Float64("lpPercent", analysis.LPTokensPercentOfTotal))
-
-	// 3. Get Top EOA Holders
-	solanaBurnAddress := "11111111111111111111111111111111"
-	// Pass valResult.PairAddress as the lpPairAddressToExclude to GetTopEOAHolders
-	topEOAHoldersRaw, err := heliusSvc.GetTopEOAHolders(mintAddressForHelius, 20, valResult.PairAddress, solanaBurnAddress)
-
-	// Calculate circulating supply for EOA percentage calculation
-	// (Total Supply - Tokens in the specific LP we are analyzing)
-	circulatingSupplyForEOAs := float64(totalSupply - tokensInLP)
-	appLogger.Debug("CalculateQualityAndBundling: Calculated circulatingSupplyForEOAs (Total - This LP)", tokenField, zap.Float64("circSupplyForEOAPerc", circulatingSupplyForEOAs))
-
-	if err != nil {
-		appLogger.Warn("Failed to get top EOA holders", tokenField, zap.Error(err))
-		// Still format the LP part if it was successful
-		analysis.BundlingInfoString = fmt.Sprintf("--- Holder Concentration ---\n⚠️ EOA holder data unavailable.\n💧 LP Pool Tokens: %.2f%% of Total", analysis.LPTokensPercentOfTotal)
-		// Set EOA percentages to 0 or handle as error in rating
-		analysis.Top1HolderEOAPercent = -1 // Use -1 to indicate data error for rating logic
-		analysis.Top5HolderEOAPercent = -1
-	} else {
-		var processedEOAHolders []HolderInfo
-		for _, rawHolder := range topEOAHoldersRaw {
-			var perc float64
-			if circulatingSupplyForEOAs > 0 { // Avoid division by zero
-				perc = (float64(rawHolder.Amount) / circulatingSupplyForEOAs) * 100
-			} else if rawHolder.Amount > 0 { // If circ supply is 0 but holder has amount, means all is with this holder (edge case)
-				perc = 100.0 // Or handle as error/special case
-			}
-			processedEOAHolders = append(processedEOAHolders, HolderInfo{
-				Address:    rawHolder.Address,
-				Amount:     rawHolder.Amount,
-				Percentage: perc,
-			})
-		}
-		// GetTopEOAHolders should already return sorted by amount.
-		// We are using the percentages calculated here.
-
-		if len(processedEOAHolders) > 0 {
-			analysis.Top1HolderEOAPercent = processedEOAHolders[0].Percentage
-		} else {
-			analysis.Top1HolderEOAPercent = 0
-		}
-
-		top5CombinedPercent := 0.0
-		for i := 0; i < len(processedEOAHolders) && i < 5; i++ {
-			top5CombinedPercent += processedEOAHolders[i].Percentage
-		}
-		analysis.Top5HolderEOAPercent = top5CombinedPercent
-
-		analysis.BundlingInfoString = fmt.Sprintf(
-			"--- Holder Concentration ---\n"+
-				"📈 Top 1 Holder (EOA): %.2f%%\n"+
-				"📊 Top 5 Holders (EOA): %.2f%%\n"+
-				"💧 LP Pool Tokens: %.2f%% of Total",
-			analysis.Top1HolderEOAPercent,
-			analysis.Top5HolderEOAPercent,
-			analysis.LPTokensPercentOfTotal,
-		)
-	}
-	appLogger.Debug("CalculateQualityAndBundling: Generated BundlingInfoString", tokenField, zap.String("bundlingInfo", analysis.BundlingInfoString))
-	appLogger.Debug("CalculateQualityAndBundling: EOA Percentages for rating", tokenField, zap.Float64("top1EOA%", analysis.Top1HolderEOAPercent), zap.Float64("top5EOA%", analysis.Top5HolderEOAPercent))
-
-	// --- Rating Calculation Logic ---
+	// --- Rating Calculation Logic (Only DexScreener metrics) ---
 	currentRating := BASE_RATING
 
 	// Penalties from DexScreener data
@@ -282,33 +154,7 @@ func CalculateQualityAndBundling(
 			appLogger.Debug("Rating: Applied 1h B/S Imbalance Moderate Penalty", tokenField, zap.Float64("penalty", RATING_BS_IMBALANCE_MODERATE_PENALTY), zap.Float64("newRating", currentRating))
 		}
 	}
-
-	// Penalties/Bonuses from Holder Analysis
-	// Only apply if Top1HolderEOAPercent is not the error indicator -1
-	if analysis.Top1HolderEOAPercent >= 0 {
-		if analysis.Top1HolderEOAPercent > HOLDER_TOP1_EXTREME_THRESHOLD {
-			currentRating -= RATING_EXTREME_TOP_1_HOLDER_PENALTY
-			appLogger.Debug("Rating: Applied Extreme Top 1 Holder Penalty", tokenField, zap.Float64("penalty", RATING_EXTREME_TOP_1_HOLDER_PENALTY), zap.Float64("newRating", currentRating))
-		} else if analysis.Top1HolderEOAPercent > HOLDER_TOP1_HIGH_THRESHOLD {
-			currentRating -= RATING_HIGH_TOP_1_HOLDER_PENALTY
-			appLogger.Debug("Rating: Applied High Top 1 Holder Penalty", tokenField, zap.Float64("penalty", RATING_HIGH_TOP_1_HOLDER_PENALTY), zap.Float64("newRating", currentRating))
-		}
-	}
-	if analysis.Top5HolderEOAPercent >= 0 { // Ensure data was available
-		if analysis.Top5HolderEOAPercent > HOLDER_TOP5_EXTREME_THRESHOLD {
-			currentRating -= RATING_EXTREME_TOP_5_HOLDERS_PENALTY
-			appLogger.Debug("Rating: Applied Extreme Top 5 Holder Penalty", tokenField, zap.Float64("penalty", RATING_EXTREME_TOP_5_HOLDERS_PENALTY), zap.Float64("newRating", currentRating))
-		} else if analysis.Top5HolderEOAPercent > HOLDER_TOP5_HIGH_THRESHOLD {
-			currentRating -= RATING_HIGH_TOP_5_HOLDERS_PENALTY
-			appLogger.Debug("Rating: Applied High Top 5 Holder Penalty", tokenField, zap.Float64("penalty", RATING_HIGH_TOP_5_HOLDERS_PENALTY), zap.Float64("newRating", currentRating))
-		}
-	}
-	// Bonus for low concentration only if data was available and meets criteria
-	if analysis.Top1HolderEOAPercent >= 0 && analysis.Top1HolderEOAPercent < HOLDER_LOW_CONC_TOP1_MAX &&
-		analysis.Top5HolderEOAPercent >= 0 && analysis.Top5HolderEOAPercent < HOLDER_LOW_CONC_TOP5_MAX {
-		currentRating += RATING_LOW_CONCENTRATION_BONUS
-		appLogger.Debug("Rating: Applied Low Concentration Bonus", tokenField, zap.Float64("bonus", RATING_LOW_CONCENTRATION_BONUS), zap.Float64("newRating", currentRating))
-	}
+	// REMOVED Holder Concentration Penalties/Bonuses
 
 	// Bonuses for strong growth (from DexScreener data)
 	if valResult.Volume5m > 0 && (valResult.Volume1h/valResult.Volume5m) >= 2.5 &&
@@ -317,7 +163,6 @@ func CalculateQualityAndBundling(
 		appLogger.Debug("Rating: Applied Strong Growth Bonus", tokenField, zap.Float64("bonus", RATING_STRONG_GROWTH_BONUS), zap.Float64("newRating", currentRating))
 	}
 
-	// Clamp rating
 	if currentRating < 1.0 {
 		currentRating = 1.0
 	}
@@ -325,55 +170,13 @@ func CalculateQualityAndBundling(
 		currentRating = 5.0
 	}
 	analysis.QualityRating = int(math.Round(currentRating))
-	appLogger.Info("CalculateQualityAndBundling: Final Calculated Quality Rating", tokenField, zap.Int("rating", analysis.QualityRating), zap.Float64("floatRatingBeforeRounding", currentRating))
+	appLogger.Info("CalculateQualityRating: Final Calculated Quality Rating", tokenField, zap.Int("rating", analysis.QualityRating), zap.Float64("floatRatingBeforeRounding", currentRating))
 
-	return analysis, nil
+	return analysis
 }
 
-func GetTokenSupply(mintAddress string, appLogger *logger.Logger) (uint64, error) {
-	appLogger.Debug("[PLACEHOLDER] GetTokenSupply: Needs real implementation.", zap.String("mint", mintAddress))
-	// TODO: Use your HeliusRPCRequest or a Solana RPC client to call "getTokenSupply"
-	// Example using a hypothetical HeliusRPCRequest structure:
-	// params := []interface{}{mintAddress} // Params might be an array or map depending on RPC method
-	// response, err := HeliusRPCRequest("getTokenSupply", params, appLogger) // Ensure HeliusRPCRequest is accessible
-	// if err != nil { return 0, err }
-	// // Parse response (e.g., response["result"].(map[string]interface{})["value"].(map[string]interface{})["uiAmountString"])
-	// // and convert to uint64.
-	return 1000000000, nil // Dummy: 1 Billion total supply for testing
-}
-
-func GetLPTokensForPair(lpPairAddress string, targetTokenMint string, appLogger *logger.Logger) (uint64, error) {
-	appLogger.Debug("[PLACEHOLDER] GetLPTokensForPair: Needs real implementation.", zap.String("lpPair", lpPairAddress), zap.String("mint", targetTokenMint))
-	// TODO: Implement actual Helius/Solana RPC logic. This is the most complex helper.
-	// 1. Get all token accounts owned by the lpPairAddress. (e.g., using getProgramAccounts filtered by owner, or getTokenAccountsByOwner).
-	//    Make sure to use the *LP Pair Account Address* from DexScreener as the owner.
-	// 2. Iterate through these token accounts to find the one whose `mint` field matches targetTokenMint.
-	// 3. Get the `amount` (balance) from that specific token account.
-	return 450000000, nil // Dummy: 45% of 1B supply for testing
-}
-
-func GetTopEOAHolders(mintAddress string, numHoldersToQuery int, lpPairAddress string, knownBurnAddress string, appLogger *logger.Logger) ([]HolderInfo, error) {
-	appLogger.Debug("[PLACEHOLDER] GetTopEOAHolders: Needs real implementation.", zap.String("mint", mintAddress))
-	// TODO: Implement actual Helius/Solana RPC logic:
-	// 1. Call `getTokenLargestAccounts` for `mintAddress` (fetch e.g., top 20-50 to have enough candidates).
-	// 2. For each account returned by getTokenLargestAccounts:
-	//    a. Get its owner. This often requires an additional `getAccountInfo` call on the token account address to find the `owner` field.
-	//    b. If the owner is the `lpPairAddress` (or any known LP program address), skip.
-	//    c. If the owner is the `knownBurnAddress`, skip.
-	//    d. If it's an EOA, add its address and raw token amount to a list.
-	// 3. Sort this list of EOAs by amount.
-	// 4. Return the top `numHoldersToQuery` from this filtered & sorted list.
-	// HolderInfo.Percentage will be calculated later in CalculateQualityAndBundling.
-	return []HolderInfo{ // Dummy data for testing
-		{Address: "EOAWhale1...", Amount: 185000000}, {Address: "EOAWhale2...", Amount: 70000000},
-		{Address: "EOAWhale3...", Amount: 30000000}, {Address: "EOAWhale4...", Amount: 20000000},
-		{Address: "EOAWhale5...", Amount: 10000000}, {Address: "EOAWhale6...", Amount: 8000000},
-		{Address: "EOAWhale7...", Amount: 7000000}, {Address: "EOAWhale8...", Amount: 6000000},
-		{Address: "EOAWhale9...", Amount: 5000000}, {Address: "EOAWhale10...", Amount: 4000000},
-	}, nil
-}
-
-func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger, heliusSvc *HeliusService) error { // ADDED heliusSvc
+// processGraduatedToken - MODIFIED: no longer uses HeliusService for bundling, calls CalculateQualityRating
+func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logger) error { // REMOVED heliusSvc
 	appLogger.Debug("Processing single graduation event")
 	tokenAddressFromEvent, ok := events.ExtractNonSolMintFromEvent(event)
 	if !ok {
@@ -411,19 +214,11 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		appLogger.Info("Token failed basic validation or hard rug checks.", tokenField, zap.String("reason", reason))
 		return nil
 	}
-	appLogger.Info("Token passed basic validation. Proceeding to quality rating & bundling analysis...", tokenField)
+	appLogger.Info("Token passed basic validation. Proceeding to quality rating...", tokenField)
 
-	// Pass HeliusService instance
-	qualityAnalysis, analysisErr := CalculateQualityAndBundling(tokenAddressFromEvent, validationResult, heliusSvc, appLogger) // MODIFIED
-	if analysisErr != nil {
-		appLogger.Error("Failed to perform quality and bundling analysis", tokenField, zap.Error(analysisErr))
-		qualityAnalysis.QualityRating = 0
-		qualityAnalysis.BundlingInfoString = "--- Holder Concentration ---\n⚠️ Analysis data unavailable."
-	}
+	qualityAnalysis := CalculateQualityRating(validationResult, appLogger) // MODIFIED call
+	appLogger.Info("Token quality rating complete", tokenField, zap.Int("qualityRating", qualityAnalysis.QualityRating))
 
-	appLogger.Info("Token analysis complete", tokenField, zap.Int("qualityRating", qualityAnalysis.QualityRating))
-
-	// --- Message Assembly (Same as your last complete version) ---
 	heliusImageURL, heliusErr := GetHeliusTokenImageURL(tokenAddressFromEvent, appLogger)
 	finalImageURL := validationResult.ImageURL
 	if heliusErr == nil && heliusImageURL != "" {
@@ -436,7 +231,19 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 			usePhoto = true
 		}
 	}
-	criteriaDetails := fmt.Sprintf("🩸 Liq: $%.0f | 🏛️ MC: $%.0f\n⌛ 5m Vol: $%.0f | ⏳ 1h Vol: $%.0f\n🔎 5m TXN: %d | 🔍 1h TXN: %d", validationResult.LiquidityUSD, validationResult.MarketCap, validationResult.Volume5m, validationResult.Volume1h, validationResult.Txns5m, validationResult.Txns1h)
+
+	criteriaDetails := fmt.Sprintf(
+		"🩸 Liq: $%.0f\n"+
+			"🏛️ MC: $%.0f\n"+
+			"⌛ 5m Vol: $%.0f\n"+
+			"⏳ 1h Vol: $%.0f\n"+
+			"🔎 5m TXN: %d\n"+
+			"🔍 1h TXN: %d",
+		validationResult.LiquidityUSD, validationResult.MarketCap,
+		validationResult.Volume5m, validationResult.Volume1h,
+		validationResult.Txns5m, validationResult.Txns1h,
+	)
+
 	socialLinksBuilder := new(strings.Builder)
 	hasSocials := false
 	if validationResult.WebsiteURL != "" {
@@ -467,6 +274,7 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	if hasSocials {
 		socialsSectionRaw = "---\nSocials\n" + strings.TrimRight(socialLinksBuilder.String(), "\n")
 	}
+
 	captionBuilder := new(strings.Builder)
 	tokenNameDisplay := validationResult.TokenName
 	if tokenNameDisplay == "" || tokenNameDisplay == "N/A" {
@@ -476,15 +284,18 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 	if tokenSymbolDisplay == "" || tokenSymbolDisplay == "N/A" {
 		tokenSymbolDisplay = "N/A"
 	}
+
 	fmt.Fprintf(captionBuilder, "🚨 %s ($%s)\n", tokenNameDisplay, tokenSymbolDisplay)
 	fmt.Fprintf(captionBuilder, "📃 CA: `%s`\n\n", tokenAddressFromEvent)
-	if qualityAnalysis.QualityRating > 0 {
+
+	if qualityAnalysis.QualityRating >= 1 && qualityAnalysis.QualityRating <= 5 { // Ensure rating is valid before creating stars
 		stars := strings.Repeat("⭐", qualityAnalysis.QualityRating) + strings.Repeat("☆", 5-qualityAnalysis.QualityRating)
-		fmt.Fprintf(captionBuilder, "🔎 Quality: %s (%d/5)\n", stars, qualityAnalysis.QualityRating)
+		fmt.Fprintf(captionBuilder, "🔎 Quality: %s (%d/5)\n\n", stars, qualityAnalysis.QualityRating)
 	} else {
-		fmt.Fprintf(captionBuilder, "🔎 Quality: Analysis Error or N/A\n")
+		fmt.Fprintf(captionBuilder, "🔎 Quality: N/A\n\n")
 	}
-	fmt.Fprintf(captionBuilder, "%s\n\n", qualityAnalysis.BundlingInfoString)
+	// REMOVED: fmt.Fprintf(captionBuilder, "%s\n\n", qualityAnalysis.BundlingInfoString)
+
 	dexscreenerURL := fmt.Sprintf("https://dexscreener.com/solana/%s", tokenAddressFromEvent)
 	fmt.Fprintf(captionBuilder, "📊 [DexScreener](%s)\n\n", dexscreenerURL)
 	fmt.Fprintf(captionBuilder, "---\n*DexScreener Stats*\n")
@@ -493,24 +304,122 @@ func processGraduatedToken(event map[string]interface{}, appLogger *logger.Logge
 		fmt.Fprintf(captionBuilder, "\n%s", socialsSectionRaw)
 	}
 	rawCaptionToSend := strings.TrimSpace(captionBuilder.String())
-	buttons := map[string]string{ /* ... Axiom, Pump.fun, Photon ... */
+
+	buttons := map[string]string{
 		"🚀 Axiom":    fmt.Sprintf("https://axiom.trade/t/%s", tokenAddressFromEvent),
 		"🧪 Pump.fun": fmt.Sprintf("https://pump.fun/coin/%s", tokenAddressFromEvent),
 		"📸 Photon":   fmt.Sprintf("https://photon-sol.tinyastro.io/en/lp/%s", tokenAddressFromEvent),
 	}
+
 	if usePhoto {
 		notifications.SendBotCallPhotoMessage(finalImageURL, rawCaptionToSend, buttons)
 	} else {
 		notifications.SendBotCallMessage(rawCaptionToSend, buttons)
 	}
+
 	graduatedTokenCache.Lock()
 	graduatedTokenCache.Data[tokenAddressFromEvent] = time.Now()
 	graduatedTokenCache.Unlock()
-	if validationResult.MarketCap > 0 { /* ... add to trackedProgressCache ... */
+	if validationResult.MarketCap > 0 {
+		baselineMC := validationResult.MarketCap
+		trackedProgressCache.Lock()
+		if _, exists := trackedProgressCache.Data[tokenAddressFromEvent]; !exists {
+			trackedProgressCache.Data[tokenAddressFromEvent] = TrackedTokenInfo{BaselineMarketCap: baselineMC, HighestMarketCapSeen: baselineMC, AddedAt: time.Now(), LastNotifiedMultiplierLevel: 0}
+			appLogger.Info("Added token to progress tracking.", tokenField, zap.Float64("baselineMC", baselineMC))
+		} else {
+			appLogger.Info("Token already in progress tracking.", tokenField)
+		}
+		trackedProgressCache.Unlock()
+	} else {
+		appLogger.Info("Token not added to progress tracking (MC=0).", tokenField)
 	}
+
 	return nil
 }
 
+// HandleWebhook - MODIFIED: no longer uses HeliusService
+func HandleWebhook(payload []byte, appLogger *logger.Logger) error { // REMOVED heliusSvc
+	appLogger.Debug("Received Graduation Webhook Payload", zap.Int("size", len(payload)))
+	if len(payload) == 0 {
+		return fmt.Errorf("empty payload received")
+	}
+	var eventsArray []map[string]interface{}
+	if err := json.Unmarshal(payload, &eventsArray); err == nil {
+		var firstErr error
+		// FIX 1: Changed 'i' to '_' because 'i' was unused.
+		for _, event := range eventsArray {
+			err := processGraduatedToken(event, appLogger) // REMOVED heliusSvc
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+	var event map[string]interface{}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return fmt.Errorf("failed to parse payload: %w", err)
+	}
+	return processGraduatedToken(event, appLogger) // REMOVED heliusSvc
+}
+
+// SetupGraduationWebhook - Unchanged, does not use HeliusService instance
+func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error { /* ... as before ... */
+	appLogger.Info("Setting up Graduation Webhook...", zap.String("url", webhookURL))
+	apiKey := env.HeliusAPIKey
+	authHeader := env.HeliusAuthHeader
+	pumpFunAuthority := env.PumpFunAuthority
+	raydiumAddressesStr := env.RaydiumAccountAddresses
+	if apiKey == "" {
+		return fmt.Errorf("missing HELIUS_API_KEY")
+	}
+	if webhookURL == "" {
+		return fmt.Errorf("webhookURL for graduation provided is empty")
+	}
+	addressesToMonitor := []string{}
+	if pumpFunAuthority != "" {
+		addressesToMonitor = append(addressesToMonitor, pumpFunAuthority)
+	}
+	if raydiumAddressesStr != "" {
+		parsedRaydiumAddrs := strings.Split(raydiumAddressesStr, ",")
+		for _, addr := range parsedRaydiumAddrs {
+			trimmedAddr := strings.TrimSpace(addr)
+			if trimmedAddr != "" {
+				addressesToMonitor = append(addressesToMonitor, trimmedAddr)
+			}
+		}
+	}
+	if len(addressesToMonitor) == 0 {
+		appLogger.Warn("No specific addresses for Graduation webhook monitoring.")
+	}
+	existingWebhook, err := CheckExistingHeliusWebhook(webhookURL, appLogger)
+	if err != nil {
+		appLogger.Error("Failed to check for existing graduation webhook", zap.Error(err))
+	}
+	if existingWebhook {
+		appLogger.Info("Graduation webhook already exists.", zap.String("url", webhookURL))
+		return nil
+	}
+	requestBody := WebhookRequest{WebhookURL: webhookURL, TransactionTypes: []string{"TRANSFER", "SWAP"}, AccountAddresses: addressesToMonitor, WebhookType: "enhanced", AuthHeader: authHeader}
+	bodyBytes, _ := json.Marshal(requestBody)
+	managementApiURL := fmt.Sprintf("https://api.helius.xyz/v0/webhooks?api-key=%s", apiKey)
+	req, _ := http.NewRequest("POST", managementApiURL, bytes.NewBuffer(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, errClient := client.Do(req) // Renamed err to errClient
+	if errClient != nil {
+		return fmt.Errorf("failed to send graduation webhook creation request: %w", errClient)
+	} // Use errClient
+	defer resp.Body.Close()
+	respBodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		appLogger.Info("Helius graduation webhook created successfully")
+		return nil
+	}
+	appLogger.Error("Failed to create Helius graduation webhook.", zap.Int("status", resp.StatusCode), zap.String("response", string(respBodyBytes)))
+	return fmt.Errorf("failed to create helius graduation webhook: status %d", resp.StatusCode)
+}
+
+// CheckTokenProgress - Unchanged, calls the simpler IsTokenValid
 func CheckTokenProgress(appLogger *logger.Logger) {
 	checkInterval := 2 * time.Minute
 	appLogger.Info("Token progress tracking routine started", zap.Duration("interval", checkInterval))
@@ -524,12 +433,15 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 			tokensToCheck[addr] = info
 		}
 		trackedProgressCache.Unlock()
-		if count := len(tokensToCheck); count == 0 {
+
+		// FIX 2: Moved 'count' declaration out of the 'if' statement's scope.
+		count := len(tokensToCheck)
+		if count == 0 {
 			appLogger.Debug("No tokens in progress cache.")
 			continue
-		} else {
-			appLogger.Info("Checking progress for tokens", zap.Int("count", count))
 		}
+		appLogger.Info("Checking progress for tokens", zap.Int("count", count)) // Now 'count' is in scope
+
 		updatesToCache := make(map[string]TrackedTokenInfo)
 		for tokenAddress, trackedInfo := range tokensToCheck {
 			tokenField := zap.String("tokenAddress", tokenAddress)
@@ -593,139 +505,4 @@ func CheckTokenProgress(appLogger *logger.Logger) {
 			trackedProgressCache.Unlock()
 		}
 	}
-}
-
-func HandleWebhook(payload []byte, appLogger *logger.Logger, heliusSvc *HeliusService) error {
-	appLogger.Debug("Received Graduation Webhook Payload", zap.Int("size", len(payload)))
-	if len(payload) == 0 {
-		appLogger.Error("Empty graduation webhook payload received!")
-		return fmt.Errorf("empty payload received")
-	}
-	var eventsArray []map[string]interface{}
-	if err := json.Unmarshal(payload, &eventsArray); err == nil {
-		appLogger.Debug("Webhook payload is an array.", zap.Int("count", len(eventsArray)))
-		var firstErr error
-		for i, event := range eventsArray {
-			appLogger.Debug("Processing event from array", zap.Int("index", i))
-			err := processGraduatedToken(event, appLogger, heliusSvc)
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		return firstErr
-	}
-	var event map[string]interface{}
-	if err := json.Unmarshal(payload, &event); err != nil {
-		appLogger.Error("Failed to parse webhook payload (neither array nor object)", zap.Error(err), zap.String("payload", string(payload)))
-		return fmt.Errorf("failed to parse payload: %w", err)
-	}
-	appLogger.Debug("Webhook payload is a single event object. Processing...")
-	return processGraduatedToken(event, appLogger, heliusSvc)
-}
-
-func SetupGraduationWebhook(webhookURL string, appLogger *logger.Logger) error {
-	appLogger.Info("Setting up Graduation Webhook...", zap.String("url", webhookURL))
-	apiKey := env.HeliusAPIKey
-	authHeader := env.HeliusAuthHeader // This is the header Helius will SEND TO YOU.
-	// webhookSecret := env.WebhookSecret // This might be Helius API secret if not using key in URL for management API calls, or not used.
-
-	pumpFunAuthority := env.PumpFunAuthority
-	raydiumAddressesStr := env.RaydiumAccountAddresses
-
-	if apiKey == "" {
-		appLogger.Error("HELIUS_API_KEY missing! Cannot set up graduation webhook.")
-		return fmt.Errorf("missing HELIUS_API_KEY")
-	}
-	if webhookURL == "" {
-		appLogger.Error("Webhook URL for graduation is empty! Cannot set up webhook.")
-		return fmt.Errorf("webhookURL for graduation provided is empty")
-	}
-
-	addressesToMonitor := []string{}
-	if pumpFunAuthority != "" {
-		addressesToMonitor = append(addressesToMonitor, pumpFunAuthority)
-		appLogger.Info("Adding PumpFun authority address to graduation webhook.", zap.String("address", pumpFunAuthority))
-	}
-	if raydiumAddressesStr != "" {
-		parsedRaydiumAddrs := strings.Split(raydiumAddressesStr, ",")
-		count := 0
-		for _, addr := range parsedRaydiumAddrs {
-			trimmedAddr := strings.TrimSpace(addr)
-			if trimmedAddr != "" {
-				addressesToMonitor = append(addressesToMonitor, trimmedAddr)
-				count++
-			}
-		}
-		appLogger.Info("Adding Raydium addresses to graduation webhook.", zap.Int("count", count))
-	}
-
-	if len(addressesToMonitor) == 0 {
-		appLogger.Warn("No specific addresses (PumpFun authority, Raydium) provided for Graduation webhook monitoring. Webhook might be too broad or ineffective if not targeting specific events.")
-		// Decide if this is an error or just a warning. If it must have addresses:
-		// return fmt.Errorf("no addresses provided for graduation webhook monitor")
-	}
-	appLogger.Info("Total addresses to monitor in graduation webhook", zap.Int("count", len(addressesToMonitor)))
-
-	// Check if webhook already exists
-	existingWebhook, err := CheckExistingHeliusWebhook(webhookURL, appLogger) // Use your implemented helper
-	if err != nil {
-		appLogger.Error("Failed to check for existing graduation webhook, attempting creation regardless.", zap.Error(err))
-	}
-	if existingWebhook {
-		appLogger.Info("Graduation webhook already exists for this URL. Skipping creation.", zap.String("url", webhookURL))
-		appLogger.Warn("Ensure existing graduation webhook's monitored addresses and transaction types are correct.")
-		return nil
-	}
-
-	appLogger.Info("Creating new Helius graduation webhook...")
-	// For graduation, you might want TRANSFER and SWAP, or more specific types if Helius supports Pump.fun specific events
-	requestBody := WebhookRequest{
-		WebhookURL:       webhookURL,
-		TransactionTypes: []string{"TRANSFER", "SWAP"}, // Adjust as needed for "graduation" events
-		AccountAddresses: addressesToMonitor,
-		WebhookType:      "enhanced", // Or "raw" or "rawEnhanced" depending on needs
-		AuthHeader:       authHeader, // The header Helius will send to your /webhook endpoint
-		// TxnStatus: "success", // Optional
-	}
-
-	bodyBytes, err := json.Marshal(requestBody)
-	if err != nil {
-		appLogger.Error("Failed to serialize graduation webhook request body", zap.Error(err))
-		return fmt.Errorf("failed to serialize graduation webhook request: %w", err)
-	}
-
-	// Use the Helius Management API endpoint for webhooks
-	managementApiURL := fmt.Sprintf("https://api.helius.xyz/v0/webhooks?api-key=%s", apiKey)
-	req, err := http.NewRequest("POST", managementApiURL, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		appLogger.Error("Failed to create graduation webhook request object", zap.Error(err))
-		return fmt.Errorf("failed to create graduation webhook request object: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// If Helius Management API requires a Bearer token in addition to api-key in URL:
-	// if env.HeliusManagementApiToken != "" { req.Header.Set("Authorization", "Bearer "+env.HeliusManagementApiToken) }
-
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		appLogger.Error("Failed to send graduation webhook creation request to Helius", zap.Error(err))
-		return fmt.Errorf("failed to send graduation webhook creation request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBodyBytes, readErr := io.ReadAll(resp.Body)
-	responseBodyStr := ""
-	if readErr == nil {
-		responseBodyStr = string(respBodyBytes)
-	} else {
-		appLogger.Warn("Failed to read graduation webhook creation response body", zap.Error(readErr))
-	}
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		appLogger.Info("Helius graduation webhook created successfully", zap.String("url", webhookURL), zap.Int("status", resp.StatusCode))
-		return nil
-	}
-
-	appLogger.Error("Failed to create Helius graduation webhook.", zap.Int("status", resp.StatusCode), zap.String("response", responseBodyStr))
-	return fmt.Errorf("failed to create helius graduation webhook: status %d, response: %s", resp.StatusCode, responseBodyStr)
 }
