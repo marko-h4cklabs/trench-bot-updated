@@ -47,6 +47,9 @@ var (
 
 	TargetGroupLink   string
 	FrontendAPISecret string
+
+	SecondaryBotCallsChatID   int64
+	SecondaryBotCallsThreadID int
 )
 
 func loadEnvVariable(key string, isRequired bool) string {
@@ -131,6 +134,8 @@ func LoadEnv() error {
 	TelegramGroupID = loadInt64Env("TELEGRAM_GROUP_ID", true)
 	BotCallsThreadID = loadIntEnv("BOT_CALLS_THREAD_ID", false)
 	TrackingThreadID = loadIntEnv("TRACKING_THREAD_ID", false)
+	SecondaryBotCallsChatID = loadInt64Env("SECONDARY_BOT_CALLS_CHAT_ID", false)
+	SecondaryBotCallsThreadID = loadIntEnv("SECONDARY_BOT_CALLS_THREAD_ID", false)
 
 	NFTCollectionAddress = loadEnvVariable("NFT_COLLECTION_ADDRESS", true)
 	nftMinHoldingStr := loadEnvVariable("NFT_MINIMUM_HOLDING", false)
