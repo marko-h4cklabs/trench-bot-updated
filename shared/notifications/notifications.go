@@ -51,7 +51,7 @@ func InitTelegramBot() error {
 		return nil // Explicitly return nil if notifications are just disabled
 	}
 	if parsedGroupID == 0 {
-		log.Println("warn: TELEGRAM_GROUP_ID missing or invalid (0). Telegram notifications to primary group disabled.")
+		log.Println("warn: TELEGRAM_GROUP_ID missing or invalid (0). Telegram notifications to primary group disabled...")
 		// Continue initialization if token is present, but defaultGroupID will be 0
 		// Specific functions will need to check if defaultGroupID is valid before sending.
 	}
