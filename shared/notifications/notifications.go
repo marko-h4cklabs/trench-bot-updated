@@ -22,7 +22,7 @@ var (
 	telegramLimiter *rate.Limiter
 	initMutex       sync.Mutex
 	isInitialized   bool
-	defaultGroupID  int64 // This will store env.TelegramGroupID
+	defaultGroupID  int64
 )
 
 const (
@@ -42,20 +42,18 @@ func InitTelegramBot() error {
 		return nil
 	}
 	botToken := env.TelegramBotToken
-	parsedGroupID := env.TelegramGroupID // Use the loaded env variable
+	parsedGroupID := env.TelegramGroupID
 
 	if botToken == "" {
 		log.Println("WARN: TELEGRAM_BOT_TOKEN missing. Telegram notifications disabled.")
 		isInitialized = false
 		bot = nil
-		return nil // Explicitly return nil if notifications are just disabled
+		return nil
 	}
 	if parsedGroupID == 0 {
 		log.Println("warn: TELEGRAM_GROUP_ID missing or invalid (0). Telegram notifications to primary group disabled...")
-		// Continue initialization if token is present, but defaultGroupID will be 0
-		// Specific functions will need to check if defaultGroupID is valid before sending.
 	}
-	defaultGroupID = parsedGroupID // Store the loaded primary group ID
+	defaultGroupID = parsedGroupID
 
 	log.Println("INFO: Initializing Telegram bot (Telego)...")
 	var err error
@@ -109,7 +107,7 @@ func EscapeMarkdownV2(s string) string {
 	builder.Grow(len(s) + 20)
 	for _, r := range s {
 		charStr := string(r)
-		if charStr == "`" { // Preserve backticks for manual code formatting
+		if charStr == "`" {
 			builder.WriteRune(r)
 			continue
 		}
@@ -163,7 +161,7 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		logPayload := escapedTextOrCaption
 		if len(logPayload) > 1000 {
 			logPayload = logPayload[:1000] + "..."
-		} // Avoid overly long log lines
+		}
 		log.Printf("DEBUG: Attempting Send API Call %s (Attempt %d/%d). Payload snippet: %s", logCtx, attempt+1, maxRetries, logPayload)
 
 		if isPhoto {
@@ -284,7 +282,6 @@ func buildReplyMarkup(buttons ...map[string]string) telego.ReplyMarkup {
 	if len(buttons) > 0 && len(buttons[0]) > 0 {
 		var rows [][]telego.InlineKeyboardButton
 		var currentRow []telego.InlineKeyboardButton
-		// Simple layout: put all buttons in one row. Adjust if more complex layout needed.
 		for label, urlValue := range buttons[0] {
 			currentRow = append(currentRow, telego.InlineKeyboardButton{Text: label, URL: urlValue})
 		}
@@ -298,8 +295,6 @@ func buildReplyMarkup(buttons ...map[string]string) telego.ReplyMarkup {
 
 func SendBotCallMessage(message string, buttons ...map[string]string) {
 	replyMarkup := buildReplyMarkup(buttons...)
-
-	// Send to primary destination
 	if defaultGroupID != 0 {
 		primaryThreadID := env.BotCallsThreadID
 		if primaryThreadID == 0 {
@@ -310,8 +305,6 @@ func SendBotCallMessage(message string, buttons ...map[string]string) {
 	} else {
 		log.Println("WARN: Primary Telegram Group ID (defaultGroupID) not set. Cannot send primary bot call message.")
 	}
-
-	// Send to secondary destination
 	if env.SecondaryBotCallsChatID != 0 {
 		secondaryThreadID := env.SecondaryBotCallsThreadID
 		log.Printf("INFO: Sending duplicate Bot Call message to secondary destination. ChatID: %d, ThreadID: %d", env.SecondaryBotCallsChatID, secondaryThreadID)
@@ -319,7 +312,6 @@ func SendBotCallMessage(message string, buttons ...map[string]string) {
 	}
 }
 
-// Helper to send text specifically to secondary, used by SendBotCallPhotoMessage fallback
 func sendBotCallTextMessageToSecondary(caption string, buttons ...map[string]string) {
 	if env.SecondaryBotCallsChatID == 0 {
 		log.Println("WARN: sendBotCallTextMessageToSecondary: SecondaryBotCallsChatID is 0. Skipping.")
@@ -347,20 +339,16 @@ func SendBotCallPhotoMessage(photoURL string, caption string, buttons ...map[str
 	}
 
 	if !photoValid {
-		// If photo URL itself is invalid, send text to both primary and secondary.
-		SendBotCallMessage(caption, buttons...) // This handles both primary and secondary text sends
+		SendBotCallMessage(caption, buttons...)
 		return
 	}
-
-	// Attempt to send photo to primary destination
 	if defaultGroupID != 0 {
 		primaryThreadID := env.BotCallsThreadID
 		if primaryThreadID == 0 {
-			log.Println("WARN: Primary Bot Calls thread ID not set for photo, sending to main topic of primary group.")
+			log.Println("WARN: Primary Bot Calls thread ID not set for photo, sending to main topic of primary group..")
 		}
 
 		log.Printf("INFO: Attempting to send Bot Call photo message to primary destination. ChatID: %d, ThreadID: %d", defaultGroupID, primaryThreadID)
-		// coreSendMessageWithRetry will attempt fallback to text for this specific call if photo send fails
 		errPrimary := coreSendMessageWithRetry(defaultGroupID, primaryThreadID, caption, true, photoURL, replyMarkup)
 		if errPrimary != nil {
 			log.Printf("WARN: Sending photo to primary destination (ChatID: %d) ultimately failed (after retries/fallbacks). Error: %v", defaultGroupID, errPrimary)
@@ -369,11 +357,9 @@ func SendBotCallPhotoMessage(photoURL string, caption string, buttons ...map[str
 		log.Println("WARN: Primary Telegram Group ID (defaultGroupID) not set. Cannot send primary bot call photo message.")
 	}
 
-	// Attempt to send photo to secondary destination
 	if env.SecondaryBotCallsChatID != 0 {
 		secondaryThreadID := env.SecondaryBotCallsThreadID
 		log.Printf("INFO: Attempting to send duplicate Bot Call photo message to secondary destination. ChatID: %d, ThreadID: %d", env.SecondaryBotCallsChatID, secondaryThreadID)
-		// coreSendMessageWithRetry will attempt fallback to text for this specific call if photo send fails
 		errSecondary := coreSendMessageWithRetry(env.SecondaryBotCallsChatID, secondaryThreadID, caption, true, photoURL, replyMarkup)
 		if errSecondary != nil {
 			log.Printf("WARN: Sending photo to secondary destination (ChatID: %d) ultimately failed (after retries/fallbacks). Error: %v", env.SecondaryBotCallsChatID, errSecondary)
@@ -398,13 +384,13 @@ func SendVerificationSuccessMessage(userID int64, groupLink string) error {
 		log.Println("ERROR: Target group link empty for verification success msg.")
 		return errors.New("target group link empty")
 	}
-	messageText := fmt.Sprintf("✅ Verification Successful\\! You now have access\\.\n\nJoin the group here: [%s](%s)", EscapeMarkdownV2("Click to Join"), groupLink) // Group link itself is not escaped
+	messageText := fmt.Sprintf("✅ Verification Successful\\! You now have access\\.\n\nJoin the group here: [%s](%s)", EscapeMarkdownV2("Click to Join"), groupLink)
 	localBot := GetBotInstance()
 	if localBot == nil {
 		log.Printf("ERROR: Bot nil for verification success msg to user %d.", userID)
 		return errors.New("bot instance nil.")
 	}
-	err := coreSendMessageWithRetry(userID, 0, messageText, false, "", nil) // DMs don't use threads
+	err := coreSendMessageWithRetry(userID, 0, messageText, false, "", nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to send verification success msg to user %d: %v", userID, err)
 	} else {
