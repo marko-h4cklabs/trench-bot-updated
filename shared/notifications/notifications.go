@@ -345,7 +345,7 @@ func SendBotCallPhotoMessage(photoURL string, caption string, buttons ...map[str
 	if defaultGroupID != 0 {
 		primaryThreadID := env.BotCallsThreadID
 		if primaryThreadID == 0 {
-			log.Println("WARN: Primary Bot Calls thread ID not set for photo, sending to main topic of primary group..")
+			log.Println("WARN: Primary Bot Calls thread id not set for photo, sending to main topic of primary group..")
 		}
 
 		log.Printf("INFO: Attempting to send Bot Call photo message to primary destination. ChatID: %d, ThreadID: %d", defaultGroupID, primaryThreadID)
