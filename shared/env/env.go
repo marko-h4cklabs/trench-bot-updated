@@ -82,7 +82,7 @@ func loadIntEnv(key string, required bool) int {
 	}
 	id, err := strconv.Atoi(strValue)
 	if err != nil {
-		log.Fatalf("FATAL: Failed to parse integer environment variable %s='%s': %v", key, strValue, err)
+		log.Fatalf("FATAL: Failed to parse integer environment variablee %s='%s': %v", key, strValue, err)
 	}
 	return id
 }
@@ -109,7 +109,7 @@ func LoadEnv() error {
 	if err != nil {
 		log.Println("INFO: .env file not found or error loading, relying on system environment variables.")
 	} else {
-		log.Println("INFO: .env file loaded successfully.")
+		log.Println("INFO: .env file loaded successfully...")
 	}
 
 	TelegramBotToken = loadEnvVariable("TELEGRAM_BOT_TOKEN", false)
