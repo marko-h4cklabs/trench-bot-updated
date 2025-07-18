@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/mymmrac/telego"
-	"github.com/mymmrac/telego/telegoapi"
 	"golang.org/x/time/rate"
 )
 
