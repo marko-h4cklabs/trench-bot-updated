@@ -9,6 +9,7 @@ import (
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -70,7 +71,7 @@ func main() {
 	appLogger.Info("Application configuration loaded.")
 
 	appLogger.Info("Initializing Telegram Bot command listener...")
-	if err := bot.InitializeBot(appLogger, nil); err != nil { // Passing nil since DB is removed
+	if err := bot.InitializeBot(appLogger, nil); err != nil {
 		appLogger.Error("Failed to initialize Telegram Bot listener", zap.Error(err))
 	} else {
 		appLogger.Info("Telegram Bot command listener initialized.")
@@ -108,7 +109,7 @@ func main() {
 	appLogger.Info("CORS middleware configured.")
 
 	handlers.RegisterRoutes(router, appLogger)
-	handlers.RegisterAPIRoutes(router, appLogger, nil) // nil DB
+	handlers.RegisterAPIRoutes(router, appLogger, nil)
 	appLogger.Info("Web server and API routes registered.")
 
 	appLogger.Info("Starting background services...")
@@ -134,7 +135,9 @@ func main() {
 		go bot.StartListening(context.Background())
 
 		// ✅ Send startup message
-		err := notifications.SendBotCallMessage("📡 Scanning started...", env.BotCallsThreadID)
+		err := notifications.SendBotCallMessage("📡 Scanning started...", map[string]string{
+			"thread_id": fmt.Sprintf("%d", env.BotCallsThreadID),
+		})
 		if err != nil {
 			appLogger.Warn("Failed to send startup message", zap.Error(err))
 		}
