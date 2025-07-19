@@ -29,9 +29,9 @@ func InitializeBot(logInstance *logger.Logger, db *gorm.DB) error {
 	}
 	appLogger = logInstance
 
-	if db == nil {
-		appLogger.Error("FATAL ERROR: InitializeBot requires a non-nil database instance")
-		return fmt.Errorf("database instance provided to InitializeBot is nil")
+	func InitializeBot(appLogger *logger.Logger, db any) error {
+	appLogger.Warn("No database instance passed to InitializeBot. Continuing without DB features.")
+	return nil
 	}
 	dbInstance = db
 

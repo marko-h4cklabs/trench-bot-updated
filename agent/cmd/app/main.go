@@ -132,6 +132,12 @@ func main() {
 	if notifications.GetBotInstance() != nil {
 		appLogger.Info("Starting Telegram Bot message listener...")
 		go bot.StartListening(context.Background())
+
+		// ✅ Send startup message
+		err := notifications.SendBotCallMessage("📡 Scanning started...", env.BOT_CALLS_THREAD_ID)
+		if err != nil {
+			appLogger.Warn("Failed to send startup message", zap.Error(err))
+		}
 	} else {
 		appLogger.Warn("Telegram Bot listener not started because bot initialization failed or was skipped.")
 	}
