@@ -134,7 +134,7 @@ func main() {
 		go bot.StartListening(context.Background())
 
 		// ✅ Send startup message
-		err := notifications.SendBotCallMessage("📡 Scanning started...", env.BOT_CALLS_THREAD_ID)
+		err := notifications.SendBotCallMessage("📡 Scanning started...", env.BotCallsThreadID)
 		if err != nil {
 			appLogger.Warn("Failed to send startup message", zap.Error(err))
 		}
