@@ -135,12 +135,13 @@ func main() {
 		go bot.StartListening(context.Background())
 
 		// ✅ Send startup message
-		err := notifications.SendBotCallMessage("📡 Scanning started...", map[string]string{
+		// Removed `err :=` because SendBotCallMessage does not return an error.
+		notifications.SendBotCallMessage("📡 Scanning started...", map[string]string{
 			"thread_id": fmt.Sprintf("%d", env.BotCallsThreadID),
 		})
-		if err != nil {
-			appLogger.Warn("Failed to send startup message", zap.Error(err))
-		}
+		// If you need to handle potential errors from coreSendMessageWithRetry,
+		// you would need to modify SendBotCallMessage to return that error.
+		// For now, based on its current definition, it doesn't.
 	} else {
 		appLogger.Warn("Telegram Bot listener not started because bot initialization failed or was skipped.")
 	}
