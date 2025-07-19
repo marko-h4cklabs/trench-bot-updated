@@ -252,7 +252,7 @@ func buildInlineButtons(buttons map[string]string) telego.ReplyMarkup {
 		}
 		row = append(row, telego.InlineKeyboardButton{
 			Text: label,
-			URL:  &url,
+			URL:  url,
 		})
 	}
 	if len(row) > 0 {
