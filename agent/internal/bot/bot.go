@@ -22,6 +22,7 @@ var botInstance *telego.Bot // Correct type
 var dbInstance *gorm.DB
 
 // InitializeBot uses *telego.Bot (Unchanged)
+// InitializeBot uses *telego.Bot
 func InitializeBot(logInstance *logger.Logger, db *gorm.DB) error {
 	if logInstance == nil {
 		log.Println("FATAL ERROR: InitializeBot requires a non-nil logger instance")
@@ -29,11 +30,11 @@ func InitializeBot(logInstance *logger.Logger, db *gorm.DB) error {
 	}
 	appLogger = logInstance
 
-	func InitializeBot(appLogger *logger.Logger, db any) error {
-	appLogger.Warn("No database instance passed to InitializeBot. Continuing without DB features.")
-	return nil
+	if db == nil {
+		appLogger.Warn("No database instance passed to InitializeBot. Continuing without DB features.")
+	} else {
+		dbInstance = db
 	}
-	dbInstance = db
 
 	botInstance = notifications.GetBotInstance()
 	if botInstance == nil {
@@ -43,6 +44,7 @@ func InitializeBot(logInstance *logger.Logger, db *gorm.DB) error {
 	appLogger.Info("Telegram bot interaction services initialized (using Telego).")
 	return nil
 }
+
 
 // Modified StartListening for Telego Long Polling and context cancellation
 func StartListening(ctx context.Context) { // Main context for overall shutdown signal
