@@ -156,10 +156,23 @@ func coreSendMessageWithRetry(chatID int64, messageThreadID int, rawTextOrCaptio
 		log.Printf("DEBUG: Attempting Send API Call %s (Attempt %d/%d). Payload snippet: %s", logCtx, attempt+1, maxRetries, logPayload)
 
 		if isPhoto {
-			params := &telego.SendPhotoParams{ChatID: telego.ChatID{ID: chatID}, Photo: telego.InputFile{URL: photoURL}, Caption: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID, ReplyMarkup: replyMarkup}
+			params := &telego.SendPhotoParams{
+				ChatID:          telego.ChatID{ID: chatID},
+				Photo:           telego.InputFile{URL: photoURL},
+				Caption:         escapedTextOrCaption,
+				ParseMode:       telego.ModeMarkdownV2,
+				MessageThreadID: messageThreadID,
+				ReplyMarkup:     replyMarkup,
+			}
 			sentMsg, currentErr = localBot.SendPhoto(ctx, params)
 		} else {
-			params := &telego.SendMessageParams{ChatID: telego.ChatID{ID: chatID}, Text: escapedTextOrCaption, ParseMode: telego.ModeMarkdownV2, MessageThreadID: messageThreadID, ReplyMarkup: replyMarkup}
+			params := &telego.SendMessageParams{
+				ChatID:          telego.ChatID{ID: chatID},
+				Text:            escapedTextOrCaption,
+				ParseMode:       telego.ModeMarkdownV2,
+				MessageThreadID: messageThreadID,
+				ReplyMarkup:     replyMarkup,
+			}
 			sentMsg, currentErr = localBot.SendMessage(ctx, params)
 		}
 		cancel()
@@ -198,7 +211,6 @@ func SendTelegramMessage(message string) {
 	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "", nil)
 }
 
-
 func SendBotCallMessage(message string, buttons map[string]string) {
 	if defaultGroupID == 0 {
 		log.Println("WARN: SendBotCallMessage: defaultGroupID is 0, cannot send.")
@@ -224,7 +236,7 @@ func SendTrackingUpdateMessage(message string) {
 		log.Println("WARN: SendTrackingUpdateMessage: defaultGroupID is 0, cannot send.")
 		return
 	}
-	threadID := env.TrackingThreadID // if you don’t use this, just hardcode 0 or BotCallsThreadID
+	threadID := env.BotCallsThreadID
 	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "", nil)
 }
 
@@ -240,11 +252,11 @@ func buildInlineButtons(buttons map[string]string) telego.ReplyMarkup {
 		}
 		row = append(row, telego.InlineKeyboardButton{
 			Text: label,
-			URL:  telego.String(url),
+			URL:  &url,
 		})
 	}
 	if len(row) > 0 {
 		rows = append(rows, row)
 	}
-	return telego.InlineKeyboardMarkup{InlineKeyboard: rows}
+	return &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
