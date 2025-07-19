@@ -1,16 +1,14 @@
 package main
 
 import (
-	"ca-scraper/agent/database"
 	"ca-scraper/agent/internal/bot"
 	"ca-scraper/agent/internal/handlers"
-	"ca-scraper/agent/internal/services" // Still needed for IsTokenValid, graduate.go functions
+	"ca-scraper/agent/internal/services"
 	"ca-scraper/shared/config"
 	"ca-scraper/shared/env"
 	"ca-scraper/shared/logger"
 	"ca-scraper/shared/notifications"
 	"context"
-	"fmt"
 	"log"
 	"time"
 
@@ -56,81 +54,15 @@ func main() {
 	}
 	appLogger.Info("Application logger initialized successfully.")
 
-	// --- REMOVED Helius Service Initialization ---
-	// appLogger.Info("Initializing Helius Service...")
-	// if env.HeliusRPCURL == "" {
-	// 	appLogger.Fatal("HELIUS_RPC_URL not set in environment variables. This is required for HeliusService.")
-	// }
-	// heliusSvc, errHelius := services.NewHeliusService(appLogger)
-	// if errHelius != nil {
-	// 	appLogger.Fatal("Failed to initialize Helius Service", zap.Error(errHelius))
-	// }
-	// appLogger.Info("Helius Service initialized successfully.")
-	// --- END REMOVED ---
-
-	var dsn string
-	if env.DATABASE_URL != "" {
-		appLogger.Info("Using DATABASE_URL for database connection.")
-		dsn = env.DATABASE_URL
-	} else {
-		appLogger.Warn("DATABASE_URL not set. Attempting to construct DSN from PG* or LOCAL_* variables.")
-		dbHost := env.PGHOST
-		dbPort := env.PGPORT
-		dbUser := env.PGUSER
-		dbPassword := env.PGPASSWORD
-		dbName := env.PGDATABASE
-
-		if dbHost == "" && env.LOCAL_DATABASE_HOST != "" {
-			appLogger.Info("Falling back to LOCAL_DATABASE_HOST")
-			dbHost = env.LOCAL_DATABASE_HOST
-		}
-		if dbPort == "" && env.LOCAL_DATABASE_PORT != "" {
-			appLogger.Info("Falling back to LOCAL_DATABASE_PORT")
-			dbPort = env.LOCAL_DATABASE_PORT
-		}
-		if dbUser == "" && env.LOCAL_DATABASE_USER != "" {
-			appLogger.Info("Falling back to LOCAL_DATABASE_USER")
-			dbUser = env.LOCAL_DATABASE_USER
-		}
-		if dbPassword == "" && env.LOCAL_DATABASE_PASSWORD != "" {
-			appLogger.Info("Falling back to LOCAL_DATABASE_PASSWORD (value hidden)")
-			dbPassword = env.LOCAL_DATABASE_PASSWORD
-		}
-		if dbName == "" && env.LOCAL_DATABASE_NAME != "" {
-			appLogger.Info("Falling back to LOCAL_DATABASE_NAME")
-			dbName = env.LOCAL_DATABASE_NAME
-		}
-
-		if dbHost == "" || dbPort == "" || dbUser == "" || dbName == "" {
-			appLogger.Fatal("Essential database connection variables are missing (DATABASE_URL, PG*, LOCAL_*)")
-		}
-
-		dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=UTC",
-			dbHost, dbUser, dbPassword, dbName, dbPort,
-		)
-		appLogger.Info("Constructed Database DSN using individual variables (password hidden)")
-	}
-
-	appLogger.Info("Connecting to database...")
-	db, errDb := database.ConnectToDatabase(dsn) // Changed err to errDb
-	if errDb != nil {
-		appLogger.Fatal("Database connection failed", zap.Error(errDb))
-	}
-	appLogger.Info("Database connection established successfully.")
-
-	appLogger.Info("Running database migrations...")
-	database.MigrateDatabase(dsn)
-	appLogger.Info("Database migrations completed.")
-
 	log.Println("INFO: Initializing Telegram notifications...")
-	if err := notifications.InitTelegramBot(); err != nil { // err is fine to be shadowed here
+	if err := notifications.InitTelegramBot(); err != nil {
 		log.Printf("WARN: Failed to initialize Telegram Bot, proceeding without Telegram features: %v", err)
 	} else {
 		log.Println("INFO: Telegram notifications initialized (if enabled and configured).")
 	}
 
 	appLogger.Info("Loading application configuration...")
-	cfg, errCfg := config.LoadConfig("agent/config.yaml") // Changed err to errCfg
+	cfg, errCfg := config.LoadConfig("agent/config.yaml")
 	if errCfg != nil {
 		appLogger.Fatal("Failed to load agent/config.yaml", zap.Error(errCfg))
 	}
@@ -138,7 +70,7 @@ func main() {
 	appLogger.Info("Application configuration loaded.")
 
 	appLogger.Info("Initializing Telegram Bot command listener...")
-	if err := bot.InitializeBot(appLogger, db); err != nil { // err is fine to be shadowed here
+	if err := bot.InitializeBot(appLogger, nil); err != nil { // Passing nil since DB is removed
 		appLogger.Error("Failed to initialize Telegram Bot listener", zap.Error(err))
 	} else {
 		appLogger.Info("Telegram Bot command listener initialized.")
@@ -148,7 +80,7 @@ func main() {
 	graduationWebhookURL := env.WebhookURL
 	if graduationWebhookURL != "" {
 		appLogger.Info("Attempting to set up Graduation webhook subscription with Helius", zap.String("yourReceivingWebhookURL", graduationWebhookURL))
-		if err := services.SetupGraduationWebhook(graduationWebhookURL, appLogger); err != nil { // err is fine here
+		if err := services.SetupGraduationWebhook(graduationWebhookURL, appLogger); err != nil {
 			appLogger.Error("Failed to set up Graduation webhook subscription", zap.Error(err))
 		} else {
 			found, checkErr := services.CheckExistingHeliusWebhook(graduationWebhookURL, appLogger)
@@ -176,8 +108,7 @@ func main() {
 	appLogger.Info("CORS middleware configured.")
 
 	handlers.RegisterRoutes(router, appLogger)
-	// MODIFIED: Call RegisterAPIRoutes without heliusSvc
-	handlers.RegisterAPIRoutes(router, appLogger, db)
+	handlers.RegisterAPIRoutes(router, appLogger, nil) // nil DB
 	appLogger.Info("Web server and API routes registered.")
 
 	appLogger.Info("Starting background services...")
@@ -187,7 +118,7 @@ func main() {
 	go func() {
 		serverAddr := ":" + env.Port
 		appLogger.Info("Starting web server", zap.String("address", serverAddr))
-		if err := router.Run(serverAddr); err != nil { // err is fine here
+		if err := router.Run(serverAddr); err != nil {
 			appLogger.Fatal("Could not start web server.", zap.Error(err))
 		}
 	}()
