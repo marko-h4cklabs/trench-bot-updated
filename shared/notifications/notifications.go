@@ -197,3 +197,54 @@ func SendTelegramMessage(message string) {
 	}
 	_ = coreSendMessageWithRetry(defaultGroupID, 0, message, false, "", nil)
 }
+
+
+func SendBotCallMessage(message string, buttons map[string]string) {
+	if defaultGroupID == 0 {
+		log.Println("WARN: SendBotCallMessage: defaultGroupID is 0, cannot send.")
+		return
+	}
+	threadID := env.BotCallsThreadID
+	replyMarkup := buildInlineButtons(buttons)
+	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "", replyMarkup)
+}
+
+func SendBotCallPhotoMessage(photoURL, caption string, buttons map[string]string) {
+	if defaultGroupID == 0 {
+		log.Println("WARN: SendBotCallPhotoMessage: defaultGroupID is 0, cannot send.")
+		return
+	}
+	threadID := env.BotCallsThreadID
+	replyMarkup := buildInlineButtons(buttons)
+	_ = coreSendMessageWithRetry(defaultGroupID, threadID, caption, true, photoURL, replyMarkup)
+}
+
+func SendTrackingUpdateMessage(message string) {
+	if defaultGroupID == 0 {
+		log.Println("WARN: SendTrackingUpdateMessage: defaultGroupID is 0, cannot send.")
+		return
+	}
+	threadID := env.TrackingThreadID // if you don’t use this, just hardcode 0 or BotCallsThreadID
+	_ = coreSendMessageWithRetry(defaultGroupID, threadID, message, false, "", nil)
+}
+
+func buildInlineButtons(buttons map[string]string) telego.ReplyMarkup {
+	if len(buttons) == 0 {
+		return nil
+	}
+	rows := make([][]telego.InlineKeyboardButton, 0, len(buttons))
+	row := []telego.InlineKeyboardButton{}
+	for label, url := range buttons {
+		if label == "" || url == "" {
+			continue
+		}
+		row = append(row, telego.InlineKeyboardButton{
+			Text: label,
+			URL:  telego.String(url),
+		})
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return telego.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
